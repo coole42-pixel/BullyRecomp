@@ -1,5 +1,9 @@
 # Third-party notices
 
+The MIT license in `LICENSE` covers the original source code, scripts, configuration and
+documentation in this repository. It does not cover `patches/`, which modifies the ReXGlue SDK
+and is provided under the SDK's BSD 3-Clause license (below), or the game itself.
+
 ## The game
 
 **Bully: Scholarship Edition** is © Rockstar Games / Take-Two Interactive Software, Inc.

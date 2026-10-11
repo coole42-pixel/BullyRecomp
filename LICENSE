@@ -19,13 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
--------------------------------------------------------------------------------
-
-Scope: this license covers the original source code, scripts, configuration and
-documentation in this repository. It does not cover:
-
-- `patches/`, which modifies the ReXGlue SDK and is provided under the SDK's
-  BSD 3-Clause license (see THIRD_PARTY_NOTICES.md);
-- Bully: Scholarship Edition or any of its code, data or assets, which are the
-  property of their respective owners and are not included in this repository.

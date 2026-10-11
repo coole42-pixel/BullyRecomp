@@ -1,0 +1,21 @@
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 76f5600..f917c1b 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -762,8 +762,14 @@ void TextureCache::DestroyAllTextures(bool from_destructor) {
+ }
+ 
+ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+-  // Check if the texture is a scaled resolve texture.
+-  if (IsDrawResolutionScaled() && key.tiled && IsScaledResolveSupportedForFormat(key)) {
++  // Check if the texture is a scaled resolve texture. Resolves cannot write block-compressed
++  // formats, so a compressed texture is never one, even if its pages are still marked: GPU
++  // writes other than resolves (memexport) do not clear the marks, and games recycle resolve
++  // target memory for streamed textures. Loading such a texture from the scaled copy shows
++  // garbage (seen as speckled, striped NPC clothing in Bully at 2x).
++  if (IsDrawResolutionScaled() && key.tiled &&
++      FormatInfo::Get(key.format)->type != FormatType::kCompressed &&
++      IsScaledResolveSupportedForFormat(key)) {
+     texture_util::TextureGuestLayout scaled_resolve_guest_layout = key.GetGuestLayout();
+     if ((scaled_resolve_guest_layout.base.level_data_extent_bytes &&
+          IsRangeScaledResolved(key.base_page << 12,

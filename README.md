@@ -49,6 +49,22 @@ SDK `0.10.0.24-dev.gbd833a2` installed at `../rexglue` (next to this folder), an
 
 4. Play with `play.cmd`, or let the game play itself with `autoplay.cmd` (see below).
 
+## Settings (BullyRecomp.ini)
+
+`play.cmd` reads `BullyRecomp.ini` next to it, created with commented defaults on first run.
+Keys are setting names (any SDK flag works, e.g. `keybind_a = Space`); `[sections]` only group
+them. Command-line flags override the INI, and unknown keys are reported in the log.
+
+**Resolution scale** (`resolution_scale` under `[Graphics]`): `1` (1280x720), `2`
+(2560x1440), `3` (3840x2160), `4` or `max`. The output is capped at 4K, so for this 720p game
+`4` and `max` give 3x; the log states the resolution used. Each step is expensive on the GPU
+(2x is four times the pixels): on the test laptop (RTX 5060 Laptop, power-limited) 2x runs at
+~45-50 fps and 3x at ~21 fps in the tutorial yard. The first launch at a new scale rebuilds
+the shader cache and can sit on the splash screen for 20-60 s; later launches are instant.
+
+Scaling above 1x needs the patched GPU plugin (`patches/rexglue-sdk-scaled-compressed-textures.patch`,
+see below); without it some NPC clothing renders as dark, speckled noise.
+
 ## Development notes
 
 Code generation needed two repaired branches and 23 extra static initializers that automatic
@@ -150,16 +166,23 @@ minimized window presents nothing. A real controller still works on top of the s
 
 ## Local SDK runtime
 
-`patches/rexglue-sdk-timer-queue.patch` (apply to a rexglue-sdk checkout at `bd833a2`, the same
-commit as the installed SDK) carries a runtime fix and its unit tests: the
-timer queue thread never blocked: it spun through `_mm_pause`/yield waiting for the 1 ms
-`KeTimeStampBundle` tick (15-65% of a core). It now waits on a high-resolution waitable timer.
-Build it and stage its DLL over the prebuilt one:
+Two patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as the installed SDK):
+
+- `patches/rexglue-sdk-scaled-compressed-textures.patch` (GPU plugin): with resolution scaling,
+  pages once written by a render-to-texture copy stay marked "scaled" after the game reuses the
+  memory for a streamed texture, because GPU writes never clear the mark. Such textures were
+  sampled from the stale 2x copy (garbage NPC clothing). Compressed (DXT) textures can never be
+  resolve targets, so they are no longer treated as scaled.
+- `patches/rexglue-sdk-timer-queue.patch` (runtime), with unit tests: the timer queue thread
+  never blocked; it spun through `_mm_pause`/yield waiting for the 1 ms `KeTimeStampBundle` tick
+  (15-65% of a core). It now waits on a high-resolution waitable timer.
+
+Build them and stage the DLLs over the prebuilt ones:
 
 ```powershell
 cd ..\rexglue-sdk
 cmake --preset win-amd64
-cmake --build out/build/win-amd64 --config Release --target rexruntime
+cmake --build out/build/win-amd64 --config Release --target rexruntime rexgpu-xenos
 cd ..\BullyRecomp
 cmake -S . -B out/build/local-win-release -D BULLYRECOMP_RUNTIME_OVERRIDE_DIR="$PWD/../rexglue-sdk/out/win-amd64/Release"
 cmake --build out/build/local-win-release

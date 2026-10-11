@@ -16,6 +16,7 @@ set(BULLYRECOMP_SOURCES
     src/audio_compat.cpp
     src/guest_locks.cpp
     src/autoplay.cpp
+    src/settings_ini.cpp
 )
 
 if(WIN32)

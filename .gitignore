@@ -19,3 +19,6 @@ __pycache__/
 *.id2
 *.nam
 *.til
+
+# Your settings (created on first run from the defaults in src/settings_ini.cpp).
+/BullyRecomp.ini

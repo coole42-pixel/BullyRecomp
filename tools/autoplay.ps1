@@ -7,6 +7,7 @@ param(
     [int]$CaptureEverySec = 10,      # screenshot interval for the contact sheet
     [int]$HangSeconds = 20,          # no guest frame for this long after boot = hang
     [switch]$PresentMon,             # also record display-side frame times
+    [switch]$NoIni,                  # ignore BullyRecomp.ini (default: test with your settings)
     [hashtable]$Env = @{},           # extra cvars as REX_<NAME> environment variables
     [string[]]$ExtraArgs = @()
 )
@@ -37,7 +38,8 @@ $launch = @('--game_data_root', ('"' + (Join-Path $root 'assets\game') + '"'),
     '--bully_capture_dir', ('"' + (Join-Path $session 'captures') + '"'),
     '--bully_capture_interval_s', $CaptureEverySec, '--bully_capture_max', '100000',
     '--bully_autoplay', ('"' + $Mode + '"'), '--bully_autoplay_seed', $Seed,
-    '--bully_autoplay_boot_s', $BootSeconds) + $ExtraArgs
+    '--bully_autoplay_boot_s', $BootSeconds,
+    '--bully_ini', $(if ($NoIni) { 'none' } else { '"' + (Join-Path $root 'BullyRecomp.ini') + '"' })) + $ExtraArgs
 $saved = @{}
 foreach ($k in $Env.Keys) {
     $n = 'REX_' + $k.ToUpperInvariant()
@@ -89,6 +91,7 @@ logman stop PresentMon -ets 2>&1 | Out-Null
 [ordered]@{
     Name = $Name; Mode = $Mode; Seed = $Seed; BootSeconds = $BootSeconds; Minutes = $Minutes
     CaptureEverySec = $CaptureEverySec; HangSeconds = $HangSeconds; Env = $Env; ExtraArgs = $ExtraArgs
+    Ini = $(if ($NoIni) { $null } else { (Join-Path $root 'BullyRecomp.ini') })
     Started = $started.ToString('s'); RanSeconds = $ran; Outcome = $outcome; ExitCode = $exitCode; FaultRva = $faultRva
 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $session 'session.json')
 

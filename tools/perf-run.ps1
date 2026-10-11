@@ -52,7 +52,7 @@ public static class BullyInput {
 
 $launch = @('--game_data_root', ('"' + (Join-Path $root 'assets\game') + '"'),
     '--log_file', ('"' + (Join-Path $perfDir "$Name.log") + '"'), '--log_level', $LogLevel,
-    '--allow_game_relative_writes', '--mnk_mode', '--bully_perf_log', ('"' + $csv + '"')) + $ExtraArgs
+    '--allow_game_relative_writes', '--mnk_mode', '--bully_ini', 'none', '--bully_perf_log', ('"' + $csv + '"')) + $ExtraArgs
 if ($Profile) { $launch += '--bully_profile' }
 $saved = @{}
 foreach ($k in $Env.Keys) {

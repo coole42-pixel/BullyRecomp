@@ -21,6 +21,7 @@
 #include <tlhelp32.h>
 #include "audio_compat.h"
 #include "bully_profiler.h"
+#include "settings_ini.h"
 #ifdef BULLYRECOMP_GPU_DIAGNOSTICS
 #include "gpu_diagnostics.h"
 #endif
@@ -60,6 +61,11 @@ class BullyrecompApp : public rex::ReXApp {
     if (config.graphics && rex::cvar::GetFlagByName("render_target_path_d3d12").empty()) {
       rex::cvar::SetFlagByName("render_target_path_d3d12", "rov");
     }
+    // The scale flags are registered by the GPU plugin, so cap them after it has loaded and
+    // before the GPU starts (they only take effect at startup).
+    if (config.graphics) {
+      bully::ApplyResolutionScaleCap();
+    }
     // Measured defaults (OPTIMIZATION.md, Phase 1): submitting on every primary buffer end
     // keeps the guest main thread spinning on GPU fences at ~41 swaps/s; submitting lazily
     // reaches ~60. Only applied when the user has not set the flag themselves.
@@ -91,10 +97,13 @@ class BullyrecompApp : public rex::ReXApp {
   ~BullyrecompApp() override { StopCapture(); StopPerf(); }
 
   void OnPostSetup() override {
+    bully::ReportUnknownIniKeys(ini_keys_);
     for (const char* flag : {"async_shader_compilation", "render_target_path_d3d12",
                             "occlusion_query_enable", "readback_resolve",
                             "readback_memexport", "gpu_allow_invalid_fetch_constants", "vsync",
-                            "d3d12_submit_on_primary_buffer_end", "bully_cs_spin_us"}) {
+                            "d3d12_submit_on_primary_buffer_end", "bully_cs_spin_us",
+                            "resolution_scale", "draw_resolution_scale_x",
+                            "draw_resolution_scale_y", "mnk_mode", "log_level"}) {
       REXLOG_INFO("GPU setting {} = {}", flag, rex::cvar::GetFlagByName(flag));
     }
   }
@@ -181,6 +190,11 @@ class BullyrecompApp : public rex::ReXApp {
   // CreateAchievementNotificationDialog() override;
   // void OnShutdown() override {}
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
+
+  // Runs just before the SDK reads its own config, early enough for every setting.
+  void OnConfigurePaths(rex::PathConfig& paths) override {
+    ini_keys_ = bully::LoadSettingsIni(paths.config_path.parent_path());
+  }
 
  private:
   // Sets a flag only if nothing (config file, environment, command line) has set it.
@@ -359,4 +373,5 @@ class BullyrecompApp : public rex::ReXApp {
   std::jthread perf_thread_;
   std::jthread profile_thread_;
   std::jthread capture_thread_;
+  std::vector<std::string> ini_keys_;
 };

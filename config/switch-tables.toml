@@ -1,0 +1,16 @@
+# Manual jump tables where automatic detection picked the wrong index register.
+# Both are "pick a random case" sites: r11 = rand() * N / 32767 indexes the table, but the
+# detector switched on r3 (the raw rand() result, 0..32767), so the generated switch hit its
+# out-of-range __builtin_trap almost every time (crash 0xC000001D ~30 s into the tutorial yard).
+
+# sub_8235E420: rlwinm r0,r11,2 / lwzx r0,r12,r0 / mtctr / bctr, table at 0x8235E4A4.
+[[switch_tables]]
+address = 0x8235E4A0
+register = 11
+labels = [0x8235E4B8, 0x8235E568, 0x8235E578, 0x8235E588, 0x8235E590]
+
+# sub_8234C948: same pattern, table at 0x8234C9BC.
+[[switch_tables]]
+address = 0x8234C9B8
+register = 11
+labels = [0x8234C9CC, 0x8234CA48, 0x8234CAC4, 0x8234CB40]

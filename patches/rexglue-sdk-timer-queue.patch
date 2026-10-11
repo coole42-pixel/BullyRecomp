@@ -1,0 +1,293 @@
+diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
+index 5cfea05..f788d82 100644
+--- a/src/core/timer_queue.cpp
++++ b/src/core/timer_queue.cpp
+@@ -18,9 +18,14 @@
+ #include <disruptorplus/spin_wait_strategy.hpp>
+ 
+ #include <rex/assert.h>
++#include <rex/platform.h>
+ #include <rex/thread.h>
+ #include <rex/thread/timer_queue.h>
+ 
++#if REX_PLATFORM_WIN32
++#include "platform_win.h"
++#endif
++
+ namespace dp = disruptorplus;
+ 
+ namespace rex::thread {
+@@ -39,6 +44,16 @@ class TimerQueue {
+         claim_strategy_(kWaitCount, wait_strategy_),
+         consumed_(wait_strategy_) {
+     claim_strategy_.add_claim_barrier(consumed_);
++#if REX_PLATFORM_WIN32
++    wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++    // High-resolution timers (Windows 10 1803+) fire within ~0.5 ms without raising the
++    // global timer resolution; fall back to a regular waitable timer on older systems.
++    deadline_timer_ = CreateWaitableTimerExW(
++        nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++    if (!deadline_timer_) {
++      deadline_timer_ = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
++    }
++#endif
+     dispatch_thread_ =
+         std::jthread([this](std::stop_token stop_token) { TimerThreadMain(stop_token); });
+   }
+@@ -52,6 +67,12 @@ class TimerQueue {
+     wait_item->Disarm();
+     QueueTimer(std::move(wait_item));
+ 
++#if REX_PLATFORM_WIN32
++    // The dispatch thread waits on these handles, so join it before closing them.
++    dispatch_thread_.join();
++    CloseHandle(deadline_timer_);
++    CloseHandle(wake_event_);
++#endif
+     // std::jthread auto-joins on destruction
+   }
+ 
+@@ -67,9 +88,22 @@ class TimerQueue {
+     while (!stop_token.stop_requested()) {
+       {
+         // Consume new wait items and add them to sorted wait queue
+-        dp::sequence_t available = claim_strategy_.wait_until_published(
+-            next_sequence, next_sequence - 1,
+-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
++        const auto next_due =
++            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_;
++#if REX_PLATFORM_WIN32
++        // Block in the kernel until the next due time or a newly queued item. The spin wait
++        // strategy below never blocks (pause, yield, and a 1 ms sleep only every 20th
++        // iteration), which kept this thread busy for most of a core just to service the
++        // 1 ms KeTimeStampBundle tick.
++        dp::sequence_t available = claim_strategy_.last_published_after(next_sequence - 1);
++        if (available == next_sequence - 1) {
++          WaitForWork(next_due);
++          available = claim_strategy_.last_published_after(next_sequence - 1);
++        }
++#else
++        dp::sequence_t available =
++            claim_strategy_.wait_until_published(next_sequence, next_sequence - 1, next_due);
++#endif
+ 
+         // Check for timeout
+         if (available != next_sequence - 1) {
+@@ -132,6 +166,11 @@ class TimerQueue {
+     auto sequence = claim_strategy_.claim_one();
+     buffer_[sequence] = std::move(wait_item);
+     claim_strategy_.publish(sequence);
++#if REX_PLATFORM_WIN32
++    // Auto-reset event: stays signaled if the dispatch thread is not waiting yet, so a
++    // wakeup cannot be lost. Queueing is rare (recurring items re-arm inside the thread).
++    SetEvent(wake_event_);
++#endif
+ 
+     return wait_item_weak;
+   }
+@@ -139,6 +178,35 @@ class TimerQueue {
+   std::jthread::id dispatch_thread_id() const { return dispatch_thread_.get_id(); }
+ 
+  private:
++#if REX_PLATFORM_WIN32
++  // Waits until `due` or until QueueTimer signals a new item, whichever comes first.
++  // May return early; the caller re-checks the queue and the clock.
++  void WaitForWork(clock::time_point due) {
++    if (due == clock::time_point::max()) {
++      WaitForSingleObject(wake_event_, INFINITE);
++      return;
++    }
++    const auto remaining = due - clock::now();
++    if (remaining <= clock::duration::zero()) {
++      return;
++    }
++    // Relative due time in 100 ns units (negative = relative), rounded up.
++    const auto ticks =
++        (std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count() + 99) / 100;
++    LARGE_INTEGER due_time;
++    due_time.QuadPart = -static_cast<LONGLONG>(ticks);
++    if (!SetWaitableTimer(deadline_timer_, &due_time, 0, nullptr, nullptr, FALSE)) {
++      WaitForSingleObject(wake_event_, 1);
++      return;
++    }
++    const HANDLE handles[] = {wake_event_, deadline_timer_};
++    WaitForMultipleObjects(2, handles, FALSE, INFINITE);
++  }
++
++  HANDLE wake_event_ = nullptr;
++  HANDLE deadline_timer_ = nullptr;
++#endif
++
+   // This ring buffer will be used to introduce timers queued by the public API
+   static constexpr size_t kWaitCount = 512;
+   dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+index 7bda2ad..c35508e 100644
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -11,6 +11,7 @@ add_executable(unit_tests
+     core/hash_test.cpp
+     core/stream_test.cpp
+     core/chrono_test.cpp
++    core/timer_queue_test.cpp
+     ppc/import_function_test.cpp
+     ppc/stack_test.cpp
+     system/guest_path_test.cpp
+diff --git a/tests/unit/core/timer_queue_test.cpp b/tests/unit/core/timer_queue_test.cpp
+new file mode 100644
+index 0000000..de5daf2
+--- /dev/null
++++ b/tests/unit/core/timer_queue_test.cpp
+@@ -0,0 +1,152 @@
++/**
++ * @file        tests/unit/core/timer_queue_test.cpp
++ * @brief       Unit tests for rex::thread timer queue: due-time accuracy, recurring
++ *              timers, disarm, wakeup on newly queued timers, and idle CPU use.
++ *
++ * @copyright   Copyright (c) 2026 BullyRecomp contributors
++ *              Contributed under the rexglue-sdk license.
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++
++#include <atomic>
++#include <chrono>
++#include <thread>
++
++#include <catch2/catch_test_macros.hpp>
++
++#include <rex/platform.h>
++#include <rex/thread/timer_queue.h>
++
++#if REX_PLATFORM_WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <timeapi.h>
++#pragma comment(lib, "winmm.lib")
++#endif
++
++using namespace std::chrono_literals;
++using rex::thread::QueueTimerOnce;
++using rex::thread::QueueTimerRecurring;
++using clock_type = rex::thread::TimerQueueWaitItem::clock;
++
++namespace {
++
++// Spins (with short sleeps) until `done` is set or `timeout` elapses.
++bool WaitFor(const std::atomic<bool>& done, std::chrono::milliseconds timeout) {
++  const auto deadline = clock_type::now() + timeout;
++  while (!done.load(std::memory_order_acquire)) {
++    if (clock_type::now() > deadline) {
++      return false;
++    }
++    std::this_thread::sleep_for(1ms);
++  }
++  return true;
++}
++
++}  // namespace
++
++TEST_CASE("one-shot timer fires at its due time, not before", "[timer_queue]") {
++  struct State {
++    std::atomic<bool> fired{false};
++    clock_type::time_point fired_at;
++  } state;
++  const auto due = clock_type::now() + 20ms;
++  QueueTimerOnce(
++      [](void* userdata) {
++        auto* s = static_cast<State*>(userdata);
++        s->fired_at = clock_type::now();
++        s->fired.store(true, std::memory_order_release);
++      },
++      &state, due);
++
++  REQUIRE(WaitFor(state.fired, 1000ms));
++  CHECK(state.fired_at >= due);
++  // Generous bound for loaded CI machines; locally this is well under 2 ms.
++  CHECK(state.fired_at - due < 15ms);
++}
++
++TEST_CASE("recurring 1 ms timer keeps up and stops when disarmed", "[timer_queue]") {
++  std::atomic<int> ticks{0};
++  auto item = QueueTimerRecurring(
++      [](void* userdata) { static_cast<std::atomic<int>*>(userdata)->fetch_add(1); }, &ticks,
++      clock_type::now(), 1ms);
++
++  std::this_thread::sleep_for(200ms);
++  auto locked = item.lock();
++  REQUIRE(locked);
++  locked->Disarm();
++  const int at_disarm = ticks.load();
++  // Late ticks are caught up, so the count follows elapsed time.
++  CHECK(at_disarm >= 150);
++  CHECK(at_disarm <= 260);
++
++  std::this_thread::sleep_for(20ms);
++  CHECK(ticks.load() == at_disarm);
++}
++
++TEST_CASE("a timer queued while the thread waits on a later one still fires on time",
++          "[timer_queue]") {
++  std::atomic<bool> far_fired{false};
++  auto far_item =
++      QueueTimerOnce([](void* userdata) { static_cast<std::atomic<bool>*>(userdata)->store(true); },
++                     &far_fired, clock_type::now() + 10s);
++  // Let the dispatch thread go to sleep until the far deadline.
++  std::this_thread::sleep_for(20ms);
++
++  struct State {
++    std::atomic<bool> fired{false};
++    clock_type::time_point fired_at;
++  } near_state;
++  const auto near_due = clock_type::now() + 10ms;
++  QueueTimerOnce(
++      [](void* userdata) {
++        auto* s = static_cast<State*>(userdata);
++        s->fired_at = clock_type::now();
++        s->fired.store(true, std::memory_order_release);
++      },
++      &near_state, near_due);
++
++  REQUIRE(WaitFor(near_state.fired, 1000ms));
++  CHECK(near_state.fired_at - near_due < 15ms);
++  CHECK_FALSE(far_fired.load());
++  if (auto locked = far_item.lock()) {
++    locked->Disarm();
++  }
++}
++
++#if REX_PLATFORM_WIN32
++TEST_CASE("1 ms recurring timer does not keep the dispatch thread busy", "[timer_queue]") {
++  // Mirrors the runtime's KeTimeStampBundle tick. The runtime also raises the system timer
++  // resolution at startup, so do the same here.
++  timeBeginPeriod(1);
++  std::atomic<int> ticks{0};
++  auto item = QueueTimerRecurring(
++      [](void* userdata) { static_cast<std::atomic<int>*>(userdata)->fetch_add(1); }, &ticks,
++      clock_type::now(), 1ms);
++  std::this_thread::sleep_for(50ms);
++
++  auto process_cpu = [] {
++    FILETIME created, exited, kernel, user;
++    GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
++    ULARGE_INTEGER k{{kernel.dwLowDateTime, kernel.dwHighDateTime}};
++    ULARGE_INTEGER u{{user.dwLowDateTime, user.dwHighDateTime}};
++    return std::chrono::nanoseconds((k.QuadPart + u.QuadPart) * 100);
++  };
++  const auto cpu_before = process_cpu();
++  const int ticks_before = ticks.load();
++  std::this_thread::sleep_for(500ms);
++  const auto cpu_used = process_cpu() - cpu_before;
++  const int ticks_during = ticks.load() - ticks_before;
++  if (auto locked = item.lock()) {
++    locked->Disarm();
++  }
++  timeEndPeriod(1);
++
++  CAPTURE(std::chrono::duration_cast<std::chrono::milliseconds>(cpu_used).count(), ticks_during);
++  CHECK(ticks_during >= 400);
++  // Spinning between ticks costs a large share of a core; blocking costs a few percent.
++  CHECK(cpu_used < 50ms);
++}
++#endif

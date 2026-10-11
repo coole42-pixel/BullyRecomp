@@ -1,0 +1,83 @@
+# Example timeline for --bully_autoplay=<file> / tools\autoplay.ps1 -Mode tools\autoplay\yard-loop.txt
+# Format: <milliseconds> [buttons...] [L=x,y] [R=x,y]   (sticks -1..1)
+# Steps after the "loop" line repeat forever; steps before it run once.
+# Buttons: A B X Y LB RB LT RT START BACK UP DOWN LEFT RIGHT LS RS
+#
+# Boot: tap A every 1.5 s for ~45 s to confirm the title menu and get through the intro.
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+120 A
+1380
+# Gameplay: a square-ish loop with camera sweeps and sprint taps, repeated forever.
+loop
+3000 L=0,1
+1000 L=0,1 R=0.8,0
+100 L=0,1 A
+300 L=0,1
+100 L=0,1 A
+300 L=0,1
+100 L=0,1 A
+2500 L=0,1
+3000 L=1,0
+1000 L=1,0 R=-0.8,0
+3000 L=0,-1
+3000 L=-1,0
+500
+120 X
+2000 L=0.7,0.7

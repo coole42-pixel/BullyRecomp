@@ -1,0 +1,30 @@
+# Missing entries in audio vtables at 0x820FC000..0x820FE000. All bodies
+# verified against original image instructions (logs/audio-vtable-disassembly.txt).
+[functions.0x82876340]
+end = 0x82876358
+[functions.0x82879DB8]
+end = 0x82879E00
+[functions.0x82879E00]
+end = 0x82879E38
+[functions.0x8287DD68]
+size = 8
+[functions.0x8287E698]
+end = 0x8287E6B0
+[functions.0x82883F10]
+size = 8
+[functions.0x82883F18]
+size = 8
+[functions.0x82883F20]
+size = 8
+[functions.0x82884E90]
+size = 8
+[functions.0x828860C8]
+size = 8
+[functions.0x828860D0]
+size = 8
+[functions.0x828860D8]
+size = 8
+[functions.0x828860E8]
+size = 8
+[functions.0x828860F8]
+size = 8

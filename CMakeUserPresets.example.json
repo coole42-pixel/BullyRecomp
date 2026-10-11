@@ -1,0 +1,18 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "local-win-release",
+      "inherits": "win-amd64-release",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "${sourceDir}/../rexglue"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "local-win-release",
+      "configurePreset": "local-win-release"
+    }
+  ]
+}

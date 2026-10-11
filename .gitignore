@@ -1,0 +1,21 @@
+# Game files: supply your own legally obtained copy (see README).
+/assets/
+# Recompiled game code, generated locally from your default.xex by `rexglue codegen`.
+/generated/
+
+# Build output, run logs, captures and local settings.
+/out/
+/logs/
+/CMakeUserPresets.json
+
+# Third-party tool binaries (see THIRD_PARTY_NOTICES.md for where to get them).
+/tools/presentmon/
+
+__pycache__/
+*.pyc
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til

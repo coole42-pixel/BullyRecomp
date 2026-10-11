@@ -1,0 +1,18 @@
+# Original virtual methods in the contiguous pointer-table region
+# 0x820314CC..0x82034610, plus related descriptor tables at 0x8202B030.
+# The runtime reached 0x823D38F8 after the intro/menu. All ranges were
+# disassembled from the original loaded XEX before configuring them.
+[functions.0x823C9F20]
+size = 12
+[functions.0x823CC280]
+end = 0x823CC2A0
+[functions.0x823D38F8]
+end = 0x823D391C
+[functions.0x823DAC18]
+size = 8
+[functions.0x823FE490]
+end = 0x823FE4B8
+[functions.0x82410D88]
+end = 0x82410DE8
+[functions.0x82421088]
+end = 0x824210B0

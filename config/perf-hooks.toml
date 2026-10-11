@@ -1,0 +1,5 @@
+# Frame counter for the optional --bully_perf_log logger: runs just before the game's only
+# VdSwap call (bl 0x82B968E0 at 0x828E6D84).
+[[midasm_hook]]
+address = 0x828E6D84
+name = "BullyFrameSwapHook"

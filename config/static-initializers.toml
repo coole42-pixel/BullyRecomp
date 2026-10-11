@@ -1,0 +1,50 @@
+# Original function pointers from the initializer table at
+# 0x82BF0014..0x82BF2B30 (2,748 distinct non-null entries). These entries were absent from the
+# generated registration map. Boundaries verified by original-XEX disassembly;
+# final instructions are tail branches, excluding any trailing zero padding.
+[functions.0x82B857A8]
+end = 0x82B857D0
+[functions.0x82B85A38]
+end = 0x82B85A54
+[functions.0x82B85AC0]
+end = 0x82B85ADC
+[functions.0x82B85F90]
+end = 0x82B85FAC
+[functions.0x82B86018]
+end = 0x82B86034
+[functions.0x82B86268]
+end = 0x82B86284
+[functions.0x82B86340]
+end = 0x82B8635C
+[functions.0x82B86378]
+end = 0x82B86394
+[functions.0x82B86450]
+end = 0x82B8646C
+[functions.0x82B86520]
+end = 0x82B8653C
+[functions.0x82B866B0]
+end = 0x82B866E0
+[functions.0x82B86C38]
+end = 0x82B86C50
+[functions.0x82B86C50]
+end = 0x82B86C6C
+[functions.0x82B86D00]
+end = 0x82B86D1C
+
+# Further entries after the first null slot in the initializer table.
+[functions.0x82B87C08]
+end = 0x82B87C24
+[functions.0x82B892A0]
+end = 0x82B892BC
+[functions.0x82B89568]
+end = 0x82B89584
+[functions.0x82B895A0]
+end = 0x82B895BC
+[functions.0x82B89698]
+end = 0x82B896B0
+[functions.0x82B896B0]
+end = 0x82B896CC
+[functions.0x82B896E8]
+end = 0x82B89704
+[functions.0x82B89720]
+end = 0x82B89738

@@ -1,0 +1,44 @@
+# Boundaries verified against the original XEX loaded by the installed SDK.
+# This leaf function contains both 0x821E0864 and 0x821E08AC. Automatic
+# discovery split its final block at 0x821E086C, losing the backward branch.
+[functions.0x821E0810]
+end = 0x821E08B8
+
+# Eight-byte this-pointer adjustment thunk: addi r3,r3,4; b 0x8287F5A0.
+# Called by the adjusting thunk at 0x82886100.
+[functions.0x82885D20]
+size = 8
+
+# Static initializer reached during the first runtime launch. Seven original
+# instructions set r3/r4/r5 and tail-call 0x8269C3D0; padding starts at AB6C.
+[functions.0x82B6AB50]
+end = 0x82B6AB6C
+
+# Vtable method at slot 0x82094044. Discovery started at its internal branch
+# target 0x8269AA24 instead of the actual entry; keep the bounds check and
+# indexed load together.
+[functions.0x8269AA10]
+end = 0x8269AA34
+
+# Vtable getter at 0x820C7E54: lwz r3,0x518(r3); blr.
+[functions.0x82775328]
+size = 8
+
+# Runtime comparison callback. Original loops at 0x82A70EF4 and 0x82A70F20
+# and both return blocks belong to this entry, not sub_82A70F54 alone.
+[functions.0x82A70EE0]
+end = 0x82A70F68
+
+# Related virtual descriptor getters in tables 0x8202A330..0x8202A4B4
+# and 0x82096338..0x8209662C. Each is lis; addi; blr.
+[functions.0x823C06C8]
+size = 12
+[functions.0x823C09B8]
+size = 12
+
+# Object-interface entries at 0x8200CD20 and 0x8200CEA4. Getter reached
+# after the menu; the second method includes its ID check and tail fallback.
+[functions.0x8220A860]
+size = 8
+[functions.0x8220D3C8]
+end = 0x8220D428

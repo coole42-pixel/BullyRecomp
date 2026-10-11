@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.25)
+project(inspect_xex LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 23)
+find_package(rexglue 0.10.0 REQUIRED CONFIG)
+add_executable(inspect_xex main.cpp)
+target_link_libraries(inspect_xex PRIVATE rex::runtime)
+rexglue_apply_target_settings(inspect_xex)

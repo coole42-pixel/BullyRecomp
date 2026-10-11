@@ -22,6 +22,10 @@
 #include "audio_compat.h"
 #include "bully_profiler.h"
 #include "settings_ini.h"
+
+namespace bully {
+void StartDebugTools(uint8_t* membase);
+}
 #ifdef BULLYRECOMP_GPU_DIAGNOSTICS
 #include "gpu_diagnostics.h"
 #endif
@@ -109,6 +113,7 @@ class BullyrecompApp : public rex::ReXApp {
   }
 
   void OnPostLaunchModule(rex::system::XThread*) override {
+    bully::StartDebugTools(runtime()->virtual_membase());
     StartPerf();
     const auto directory = REXCVAR_GET(bully_capture_dir);
     auto* graphics = runtime()->graphics_system();

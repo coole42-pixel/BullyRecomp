@@ -37,7 +37,11 @@ constexpr const char* kDefaultIni = R"(; BullyRecomp settings
 ; Internal render resolution: 1 (1280x720), 2 (2560x1440), 3 (3840x2160), 4, or max.
 ; Capped at 3840x2160 (4K), so 4 and max both give 3x for this 720p game.
 ; Each step costs a lot of GPU time (2x = 4 times the pixels).
+; Shadows also get sharper with the scale (the shadow map is rendered at 2048 at 2x).
 resolution_scale = 1
+; Keep the game's shadow filter in step with the scaled shadow map. Turning this off
+; at 2x and above makes shadows checkered and blocky.
+scaled_texture_size_constants = true
 ; Upscaling/sharpening when drawing to the window: bilinear, cas, fsr, fsr2, fsr3
 present_effect = bilinear
 ; Post-process anti-aliasing on the game image: none, fxaa, fxaa_extreme

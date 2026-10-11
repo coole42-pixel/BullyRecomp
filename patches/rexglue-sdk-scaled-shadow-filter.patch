@@ -1,0 +1,110 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 96d362b..4f05b2c 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -705,6 +705,8 @@ class D3D12CommandProcessor : public CommandProcessor {
+   ConstantBufferBinding cbuffer_binding_system_;
+   ConstantBufferBinding cbuffer_binding_float_vertex_;
+   ConstantBufferBinding cbuffer_binding_float_pixel_;
++  // Sizes of resolution-scaled textures last applied to the pixel float constants.
++  uint64_t scaled_texture_size_signature_ = 0;
+   ConstantBufferBinding cbuffer_binding_bool_loop_;
+   ConstantBufferBinding cbuffer_binding_fetch_;
+   ConstantBufferBinding cbuffer_binding_descriptor_indices_vertex_;
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..3208889 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -35,6 +35,12 @@
+ REXCVAR_DEFINE_BOOL(d3d12_bindless, true, "GPU/D3D12", "Use bindless resources where available")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(scaled_texture_size_constants, true, "GPU",
++                    "With draw resolution scaling, scale pixel shader constants that equal the "
++                    "guest size (or 1/size) of a sampled resolution-scaled texture, so manual "
++                    "filtering such as shadow-map PCF steps over the real host texels")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(d3d12_readback_memexport, false, "GPU/D3D12",
+                     "Read data written by memory export in shaders on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -4128,6 +4134,52 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+     cbuffer_binding_float_vertex_.up_to_date = true;
+     current_graphics_root_up_to_date_ &= ~(1u << root_parameter_float_constants_vertex);
+   }
++  // Games that filter render-target textures by hand (shadow-map PCF) pass the texture size
++  // as a constant, e.g. float2(1024, 1024). With resolution scaling the host texture is
++  // larger, so those taps skip host texels and weights are computed on the wrong grid
++  // (checkerboarded shadows). Collect the guest sizes of scaled textures this pixel shader
++  // samples; constants exactly equal to a size (or its reciprocal) are scaled when uploaded.
++  struct ScaledTextureSize {
++    float width, height;
++  };
++  ScaledTextureSize scaled_texture_sizes[4];
++  uint32_t scaled_texture_size_count = 0;
++  const uint32_t size_scale_x = texture_cache_->draw_resolution_scale_x();
++  const uint32_t size_scale_y = texture_cache_->draw_resolution_scale_y();
++  if (pixel_shader != nullptr && (size_scale_x > 1 || size_scale_y > 1) &&
++      REXCVAR_GET(scaled_texture_size_constants)) {
++    for (const Shader::TextureBinding& binding : pixel_shader->texture_bindings()) {
++      if (scaled_texture_size_count >= rex::countof(scaled_texture_sizes)) {
++        break;
++      }
++      if (!texture_cache_->IsActiveTextureResolutionScaled(binding.fetch_constant)) {
++        continue;
++      }
++      xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(binding.fetch_constant);
++      if (fetch.dimension != xenos::DataDimension::k2DOrStacked) {
++        continue;
++      }
++      ScaledTextureSize size{float(fetch.size_2d.width + 1), float(fetch.size_2d.height + 1)};
++      bool duplicate = false;
++      for (uint32_t i = 0; i < scaled_texture_size_count; ++i) {
++        duplicate |= scaled_texture_sizes[i].width == size.width &&
++                     scaled_texture_sizes[i].height == size.height;
++      }
++      if (!duplicate) {
++        scaled_texture_sizes[scaled_texture_size_count++] = size;
++      }
++    }
++  }
++  uint64_t scaled_texture_size_signature = scaled_texture_size_count;
++  for (uint32_t i = 0; i < scaled_texture_size_count; ++i) {
++    scaled_texture_size_signature =
++        scaled_texture_size_signature * 0x100000001B3ull +
++        (uint64_t(scaled_texture_sizes[i].width) << 16 | uint64_t(scaled_texture_sizes[i].height));
++  }
++  if (scaled_texture_size_signature != scaled_texture_size_signature_) {
++    scaled_texture_size_signature_ = scaled_texture_size_signature;
++    cbuffer_binding_float_pixel_.up_to_date = false;
++  }
+   if (!cbuffer_binding_float_pixel_.up_to_date) {
+     uint8_t* float_constants = constant_buffer_pool_->Request(
+         frame_current_, sizeof(float) * 4 * std::max(float_constant_count_pixel, uint32_t(1)),
+@@ -4148,6 +4200,26 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+               float_constants,
+               &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (float_constant_index << 2)],
+               4 * sizeof(float));
++          if (scaled_texture_size_count) {
++            float* values = reinterpret_cast<float*>(float_constants);
++            for (uint32_t c = 0; c < 4; ++c) {
++              for (uint32_t t = 0; t < scaled_texture_size_count; ++t) {
++                const ScaledTextureSize& size = scaled_texture_sizes[t];
++                if (values[c] == size.width) {
++                  values[c] *= float(size_scale_x);
++                } else if (values[c] == size.height) {
++                  values[c] *= float(size_scale_y);
++                } else if (values[c] == 1.0f / size.width) {
++                  values[c] /= float(size_scale_x);
++                } else if (values[c] == 1.0f / size.height) {
++                  values[c] /= float(size_scale_y);
++                } else {
++                  continue;
++                }
++                break;
++              }
++            }
++          }
+           float_constants += 4 * sizeof(float);
+         }
+       }

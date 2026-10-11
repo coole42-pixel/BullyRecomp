@@ -62,8 +62,14 @@ them. Command-line flags override the INI, and unknown keys are reported in the 
 ~45-50 fps and 3x at ~21 fps in the tutorial yard. The first launch at a new scale rebuilds
 the shader cache and can sit on the splash screen for 20-60 s; later launches are instant.
 
-Scaling above 1x needs the patched GPU plugin (`patches/rexglue-sdk-scaled-compressed-textures.patch`,
-see below); without it some NPC clothing renders as dark, speckled noise.
+Scaling above 1x needs the patched GPU plugin (see "Local SDK runtime" below). Without it some
+NPC clothing renders as dark, speckled noise, and shadows turn into a checkerboard.
+
+**Shadows** come from a 1024x1024 shadow map, the most the Xbox 360's 10 MB of EDRAM fits
+(colour + depth); a larger map overflows EDRAM and corrupts, so its size is not an option.
+Resolution scale renders that map at 2048 (2x) or 3072 (3x) host pixels instead, and
+`scaled_texture_size_constants = true` (the default) keeps the game's PCF shadow filter in step
+with it, so shadows get sharper with the scale instead of checkered.
 
 ## Development notes
 
@@ -129,6 +135,14 @@ The extraction command used was:
 
 ## Tools
 
+`src/debug_tools.cpp` has runtime reverse-engineering helpers (off by default):
+`--bully_find_texture=1024x1024:36` logs guest texture fetch constants of a size/format,
+`--bully_find_dwords=44800000,44800000` logs guest addresses holding a dword sequence, and
+`--bully_watch_address=<hex guest address>` sets a hardware write breakpoint and logs the call
+stacks (resolve the `E:` module offsets against `BullyRecomp.map`). This is how the shadow-map
+creation path (`sub_8271BA38` -> `NiShadowManager` `sub_8268ED28`) was found.
+`tools\autoplay\shadow-orbit.txt` stands Jimmy still and orbits the camera for shadow checks.
+
 `tools/inspect-xex` is a small offline inspector using this installed SDK's XEX
 loader. It reads image bytes without launching guest code. Its executable needs
 the SDK `bin` directory on `PATH` to locate `rexruntime.dll`.
@@ -173,6 +187,12 @@ Two patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as the
   memory for a streamed texture, because GPU writes never clear the mark. Such textures were
   sampled from the stale 2x copy (garbage NPC clothing). Compressed (DXT) textures can never be
   resolve targets, so they are no longer treated as scaled.
+- `patches/rexglue-sdk-scaled-shadow-filter.patch` (GPU plugin): Bully filters its shadow map
+  by hand with `ShadowMapSize = 1024` (Gamebryo's `TexSizeShadow` constant). With resolution
+  scaling the map is 2048+ host texels, so the filter skipped texels and weighted on the wrong
+  grid (checkerboard shadows). Pixel shader constants that exactly equal the guest size (or
+  1/size) of a sampled resolution-scaled texture are now scaled with it
+  (`scaled_texture_size_constants`, default on).
 - `patches/rexglue-sdk-timer-queue.patch` (runtime), with unit tests: the timer queue thread
   never blocked; it spun through `_mm_pause`/yield waiting for the 1 ms `KeTimeStampBundle` tick
   (15-65% of a core). It now waits on a high-resolution waitable timer.

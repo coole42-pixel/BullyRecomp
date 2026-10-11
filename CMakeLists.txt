@@ -17,6 +17,7 @@ set(BULLYRECOMP_SOURCES
     src/guest_locks.cpp
     src/autoplay.cpp
     src/settings_ini.cpp
+    src/debug_tools.cpp
 )
 
 if(WIN32)

@@ -10,6 +10,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
 
+# The installed CLI predates the local db16cyc lowering. Keep automatic codegen
+# on the same patched SDK as explicit regeneration, without editing generated CMake.
+set(BULLYRECOMP_CODEGEN_EXECUTABLE "" CACHE FILEPATH "Patched rexglue executable for automatic codegen")
+if(BULLYRECOMP_CODEGEN_EXECUTABLE)
+    if(NOT EXISTS "${BULLYRECOMP_CODEGEN_EXECUTABLE}")
+        message(FATAL_ERROR "Codegen override does not exist: ${BULLYRECOMP_CODEGEN_EXECUTABLE}")
+    endif()
+    get_target_property(_bully_codegen_imported rex::rexglue IMPORTED)
+    if(NOT _bully_codegen_imported)
+        message(FATAL_ERROR "Codegen override requires an installed SDK; source SDK builds use their own CLI")
+    endif()
+    set_property(TARGET rex::rexglue PROPERTY IMPORTED_LOCATION "${BULLYRECOMP_CODEGEN_EXECUTABLE}")
+    get_target_property(_bully_codegen_configs rex::rexglue IMPORTED_CONFIGURATIONS)
+    foreach(_bully_config IN LISTS _bully_codegen_configs)
+        set_property(TARGET rex::rexglue PROPERTY IMPORTED_LOCATION_${_bully_config}
+            "${BULLYRECOMP_CODEGEN_EXECUTABLE}")
+    endforeach()
+endif()
+
 # Sources
 set(BULLYRECOMP_SOURCES
     src/main.cpp
@@ -40,7 +59,14 @@ set(BULLYRECOMP_RUNTIME_OVERRIDE_DIR "" CACHE PATH
     "Directory with locally built rexruntime.dll / rexgpu-xenos.dll to stage instead of the SDK's")
 if(BULLYRECOMP_RUNTIME_OVERRIDE_DIR)
     foreach(dll rexruntime.dll rexgpu-xenos.dll)
+        if(NOT EXISTS "${BULLYRECOMP_RUNTIME_OVERRIDE_DIR}/${dll}")
+            message(FATAL_ERROR "Required runtime override is missing: ${BULLYRECOMP_RUNTIME_OVERRIDE_DIR}/${dll}")
+        endif()
         if(EXISTS "${BULLYRECOMP_RUNTIME_OVERRIDE_DIR}/${dll}")
+            # A changed SDK DLL must trigger relinking/restaging even if the
+            # game's own objects are up to date.
+            set_property(TARGET BullyRecomp APPEND PROPERTY LINK_DEPENDS
+                "${BULLYRECOMP_RUNTIME_OVERRIDE_DIR}/${dll}")
             add_custom_command(TARGET BullyRecomp POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${BULLYRECOMP_RUNTIME_OVERRIDE_DIR}/${dll}" "$<TARGET_FILE_DIR:BullyRecomp>"

@@ -213,7 +213,12 @@ These patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as t
 - `patches/rexglue-sdk-timer-queue.patch` (runtime), with unit tests: the timer queue thread
   never blocked; it spun through `_mm_pause`/yield waiting for the 1 ms `KeTimeStampBundle` tick
   (15-65% of a core). It now waits on a high-resolution waitable timer.
-
+- `patches/rexglue-sdk-top5-performance.patch` (GPU plugin and codegen), applied after the
+  shadow-filter and TimerQueue patches: async submission no longer drains pipeline creation;
+  bindless depth-only shaders can compile asynchronously; shader publication and cache-flush
+  requests are synchronized. Real occlusion results are queued until their GPU fence completes,
+  with query-slot reuse protected and idle/WAIT_REG_MEM completion polling. `db16cyc` emits
+  a portable processor pause. Includes codegen and query-lifecycle regression tests.
 - `patches/rexglue-sdk-host-vsync.patch` (runtime): adds `d3d12_vsync` to synchronize
   display presentation independently of guest console timing. Bully enables it by default
   while keeping guest `vsync` off for 60 FPS. Also adds `d3d12_frame_pacing`: a DXGI
@@ -229,17 +234,33 @@ These patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as t
   disconnects, so keyboard packet counters cannot hide controller changes. Includes
   regression tests for stick release, dialog blocking/resume, and disconnect clearing.
 
+The local `BullyRecomp.ini` now uses `resolution_scale=1`, matching first-run defaults. The INI
+is ignored by Git; higher scales remain opt-in quality settings. ROV remains the render-target
+default: RTV testing narrowed its black-world failure to depth handling, but disabling depth
+is only a diagnostic and is not a correctness fix. See `PERF_ISSUES.md` for results and limits.
+
 Build them and stage the DLLs over the prebuilt ones:
 
 ```powershell
 cd ..\rexglue-sdk
 cmake --preset win-amd64
-cmake --build out/build/win-amd64 --config Release --target rexruntime rexgpu-xenos
+cmake --build out/build/win-amd64 --config Release --target rexruntime rexgpu-xenos rexglue unit_tests
 cd ..\BullyRecomp
-cmake -S . -B out/build/local-win-release -D BULLYRECOMP_RUNTIME_OVERRIDE_DIR="$PWD/../rexglue-sdk/out/win-amd64/Release"
+& '..\rexglue-sdk\out\win-amd64\Release\rexglue.exe' codegen --ignore-stamp .\BullyRecomp_manifest.toml
+cmake -S . -B out/build/local-win-release -D BULLYRECOMP_RUNTIME_OVERRIDE_DIR="$PWD/../rexglue-sdk/out/win-amd64/Release" -D BULLYRECOMP_CODEGEN_EXECUTABLE="$PWD/../rexglue-sdk/out/win-amd64/Release/rexglue.exe"
 cmake --build out/build/local-win-release
 ```
 
-Clear `BULLYRECOMP_RUNTIME_OVERRIDE_DIR` to go back to the prebuilt runtime. On Windows, git
+Set `BULLYRECOMP_CODEGEN_EXECUTABLE` so automatic regeneration also preserves the pause hints;
+using the old installed CLI would drop them again. Runtime overrides now fail configuration
+if either DLL is missing. Override DLLs are link dependencies, so a subsequent game build
+relinks/restages changed SDK binaries even when the game's own objects are up to date.
+
+`d3d12_async_occlusion_queries=false` restores synchronous real-query completion for A/B checks.
+`d3d12_log_perf_counters=true` logs cumulative query completions/waits and skipped async draws;
+it is off in normal play. `d3d12_log_depth_state`, `d3d12_diagnostic_disable_depth` and
+`d3d12_diagnostic_disable_stencil` are explicitly opt-in rendering diagnostics, not play settings.
+
+Clear `BULLYRECOMP_RUNTIME_OVERRIDE_DIR` and `BULLYRECOMP_CODEGEN_EXECUTABLE` to go back to the prebuilt SDK. On Windows, git
 checks submodule symlinks out as text files; `thirdparty/libmspack` and `thirdparty/o1heap` had
 their 16 symlinks replaced with copies of the targets to build.

@@ -1,0 +1,698 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index da8e432..3ffceba 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -167,6 +167,8 @@ class CommandProcessor {
+ 
+   virtual void MakeCoherent();
+   virtual void PrepareForWait();
++  // Service completed asynchronous work even when the guest submits no commands.
++  virtual bool PollPendingWork();
+   virtual void ReturnFromWait();
+ 
+   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 4f05b2c..7c2197a 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -32,6 +32,7 @@
+ #include <rex/graphics/d3d12/shared_memory.h>
+ #include <rex/graphics/d3d12/texture_cache.h>
+ #include <rex/graphics/pipeline/shader/dxbc.h>
++#include <rex/graphics/pipeline/occlusion_query_queue.h>
+ #include <rex/graphics/pipeline/shader/dxbc_translator.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+@@ -211,6 +212,8 @@ class D3D12CommandProcessor : public CommandProcessor {
+                  uint32_t frontbuffer_height) override;
+ 
+   void OnPrimaryBufferEnd() override;
++  void PrepareForWait() override;
++  bool PollPendingWork() override;
+ 
+   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
+                      const uint32_t* host_address, uint32_t dword_count) override;
+@@ -408,6 +411,7 @@ class D3D12CommandProcessor : public CommandProcessor {
+   bool EndGuestOcclusionQuery(uint32_t sample_count_address,
+                               xenos::xe_gpu_depth_sample_counts* sample_counts);
+   bool AcquireOcclusionQueryIndex(uint32_t& host_index_out);
++  void PublishCompletedOcclusionQueries(uint64_t completed);
+   void DisableHostOcclusionQueries();
+   uint64_t NormalizeOcclusionSamples(uint64_t samples) const;
+   void WriteGuestOcclusionResult(xenos::xe_gpu_depth_sample_counts* sample_counts,
+@@ -652,7 +656,12 @@ class D3D12CommandProcessor : public CommandProcessor {
+   Microsoft::WRL::ComPtr<ID3D12QueryHeap> occlusion_query_heap_;
+   Microsoft::WRL::ComPtr<ID3D12Resource> occlusion_query_readback_;
+   uint64_t* occlusion_query_readback_mapping_ = nullptr;
+-  uint32_t occlusion_query_cursor_ = 0;
++  OcclusionQueryQueue<kMaxOcclusionQueries> occlusion_queries_;
++  uint64_t occlusion_queries_ended_ = 0;
++  uint64_t occlusion_queries_published_ = 0;
++  uint64_t occlusion_query_waits_ = 0;
++  uint64_t async_draws_skipped_ = 0;
++  uint64_t occlusion_wakeup_submission_ = 0;
+   bool occlusion_query_resources_available_ = false;
+   struct ActiveOcclusionQuery {
+     uint32_t sample_count_address = 0;
+diff --git a/include/rex/graphics/d3d12/pipeline_cache.h b/include/rex/graphics/d3d12/pipeline_cache.h
+index 7a9d6a2..393b335 100644
+--- a/include/rex/graphics/d3d12/pipeline_cache.h
++++ b/include/rex/graphics/d3d12/pipeline_cache.h
+@@ -375,7 +375,7 @@ class PipelineCache {
+   // For only writing shaders to the currently open storage once, incremented
+   // when switching the storage.
+   uint32_t shader_storage_index_ = 0;
+-  bool shader_storage_file_flush_needed_ = false;
++  std::atomic<bool> shader_storage_file_flush_needed_{false};
+ 
+   // Pipeline storage output stream, for preload in the next emulator runs.
+   FILE* pipeline_storage_file_ = nullptr;
+diff --git a/include/rex/graphics/pipeline/occlusion_query_queue.h b/include/rex/graphics/pipeline/occlusion_query_queue.h
+new file mode 100644
+index 0000000..e5168c5
+--- /dev/null
++++ b/include/rex/graphics/pipeline/occlusion_query_queue.h
+@@ -0,0 +1,65 @@
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++
++namespace rex::graphics {
++
++// Command-processor-owned query slots. A slot remains reserved until the
++// submission that resolved it completes, even if its guest result is abandoned.
++template <size_t Capacity>
++class OcclusionQueryQueue {
++  static_assert(Capacity > 0);
++ public:
++  struct Pending {
++    uint32_t index;
++    uint32_t guest_address;
++    uint64_t submission;
++  };
++
++  bool Acquire(uint32_t& index) {
++    for (size_t i = 0; i < Capacity; ++i) {
++      const uint32_t candidate = cursor_;
++      cursor_ = (cursor_ + 1) % Capacity;
++      if (!reserved_[candidate]) {
++        reserved_[candidate] = true;
++        index = candidate;
++        return true;
++      }
++    }
++    return false;
++  }
++
++  void Release(uint32_t index) { reserved_[index] = false; }
++  void Enqueue(uint32_t index, uint32_t address, uint64_t submission) {
++    pending_.push_back({index, address, submission});
++  }
++  bool empty() const { return pending_.empty(); }
++  uint64_t oldest_submission() const { return pending_.front().submission; }
++  bool HasUnsubmitted(uint64_t submission) const {
++    return !pending_.empty() && pending_.back().submission == submission;
++  }
++  template <typename Publish>
++  void Retire(uint64_t completed, Publish publish) {
++    while (!pending_.empty() && pending_.front().submission <= completed) {
++      const Pending query = pending_.front();
++      publish(query);
++      Release(query.index);
++      pending_.pop_front();
++    }
++  }
++  void Reset() {
++    pending_.clear();
++    reserved_.fill(false);
++    cursor_ = 0;
++  }
++
++ private:
++  std::array<bool, Capacity> reserved_{};
++  uint32_t cursor_ = 0;
++  std::deque<Pending> pending_;
++};
++
++}  // namespace rex::graphics
+diff --git a/include/rex/graphics/pipeline/shader/shader.h b/include/rex/graphics/pipeline/shader/shader.h
+index 4cf3854..24ee697 100644
+--- a/include/rex/graphics/pipeline/shader/shader.h
++++ b/include/rex/graphics/pipeline/shader/shader.h
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cstdint>
+ #include <filesystem>
+ #include <set>
+@@ -768,10 +769,10 @@ class Shader {
+     uint64_t modification() const { return modification_; }
+ 
+     // True if the shader was translated and prepared without error.
+-    bool is_valid() const { return is_valid_; }
++    bool is_valid() const { return is_valid_.load(std::memory_order_acquire); }
+ 
+     // True if the shader has already been translated.
+-    bool is_translated() const { return is_translated_; }
++    bool is_translated() const { return is_translated_.load(std::memory_order_acquire); }
+ 
+     // Errors that occurred during translation.
+     const std::vector<Error>& errors() const { return errors_; }
+@@ -813,8 +814,8 @@ class Shader {
+     Shader& shader_;
+     uint64_t modification_;
+ 
+-    bool is_valid_ = false;
+-    bool is_translated_ = false;
++    std::atomic<bool> is_valid_{false};
++    std::atomic<bool> is_translated_{false};
+     std::vector<Error> errors_;
+     std::vector<uint8_t> translated_binary_;
+     std::string host_disassembly_;
+diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
+index f560429..fed8cc6 100644
+--- a/src/codegen/builders/system.cpp
++++ b/src/codegen/builders/system.cpp
+@@ -61,8 +61,10 @@ bool build_eieio(BuilderContext& ctx) {
+ }
+ 
+ bool build_db16cyc(BuilderContext& ctx) {
+-  // Xenon-specific 16-cycle delay hint, no effect in recompiled code
+-  (void)ctx;
++  // Preserve spin-loop backoff without imposing a wall-clock sleep. SIMDe maps
++  // this to PAUSE on x86 and a platform-appropriate hint elsewhere; the host
++  // latency need not equal Xenon's exact 16 cycles.
++  ctx.println("\tsimde_mm_pause();");
+   return true;
+ }
+ 
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..b6d93c9 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -219,9 +219,10 @@ void CommandProcessor::WorkerThreadMain() {
+       PrepareForWait();
+       uint32_t loop_count = 0;
+       do {
++        const bool has_pending_work = PollPendingWork();
+         // If we spin around too much, revert to a "low-power" state.
+         if (loop_count > 500) {
+-          const int wait_time_ms = 5;
++          const int wait_time_ms = has_pending_work ? 1 : 5;
+           rex::thread::Wait(write_ptr_index_event_.get(), true,
+                             std::chrono::milliseconds(wait_time_ms));
+         }
+@@ -610,6 +611,8 @@ void CommandProcessor::MakeCoherent() {
+ 
+ void CommandProcessor::PrepareForWait() {}
+ 
++bool CommandProcessor::PollPendingWork() { return false; }
++
+ void CommandProcessor::ReturnFromWait() {}
+ 
+ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t write_index) {
+@@ -991,6 +994,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+ 
+   bool matched = false;
+   do {
++    PollPendingWork();
+     uint32_t value = 0;
+     if (is_memory) {
+       value =
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 3208889..7bf0e99 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -53,6 +53,22 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
+                     "Submit command list when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(d3d12_async_occlusion_queries, true, "GPU/D3D12",
++                    "Publish real occlusion results when their GPU submission completes")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(d3d12_log_perf_counters, false, "GPU/D3D12",
++                    "Log cumulative query and skipped-async-draw counts every 60 guest frames");
++
++REXCVAR_DEFINE_BOOL(d3d12_diagnostic_disable_depth, false, "GPU/D3D12",
++                    "Diagnostic only: disable depth/stencil on guest draws to isolate RTV failures");
++
++REXCVAR_DEFINE_BOOL(d3d12_diagnostic_disable_stencil, false, "GPU/D3D12",
++                    "Diagnostic only: disable stencil on guest draws to isolate RTV failures");
++
++REXCVAR_DEFINE_BOOL(d3d12_log_depth_state, false, "GPU/D3D12",
++                    "Diagnostic only: log guest depth and viewport state every 120 frames");
++
+ namespace rex::graphics::d3d12 {
+ 
+ // Generated with `xb buildshaders`.
+@@ -2263,10 +2279,56 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+ }
+ 
+ void D3D12CommandProcessor::OnPrimaryBufferEnd() {
+-  if (REXCVAR_GET(d3d12_submit_on_primary_buffer_end) && submission_open_ &&
++  if ((REXCVAR_GET(d3d12_submit_on_primary_buffer_end) ||
++       occlusion_queries_.HasUnsubmitted(submission_current_)) && submission_open_ &&
+       CanEndSubmissionImmediately()) {
+     EndSubmission(false);
+   }
++  PollPendingWork();
++}
++
++void D3D12CommandProcessor::PrepareForWait() {
++  // A guest may stop submitting while polling the query completion sentinel.
++  // Flush unresolved query work before entering the idle or WAIT_REG_MEM loop.
++  if (submission_open_ && occlusion_queries_.HasUnsubmitted(submission_current_)) {
++    EndSubmission(false);
++  }
++  PollPendingWork();
++}
++
++bool D3D12CommandProcessor::PollPendingWork() {
++  if (!occlusion_queries_.empty() && submission_fence_) {
++    const uint64_t completed = submission_fence_->GetCompletedValue();
++    if (completed != UINT64_MAX) {
++      PublishCompletedOcclusionQueries(completed);
++      if (completed >= occlusion_wakeup_submission_) occlusion_wakeup_submission_ = 0;
++      if (!occlusion_queries_.empty() && !occlusion_wakeup_submission_ &&
++          occlusion_queries_.oldest_submission() < submission_current_ && write_ptr_index_event_) {
++        const uint64_t due = occlusion_queries_.oldest_submission();
++        if (SUCCEEDED(submission_fence_->SetEventOnCompletion(
++                due, reinterpret_cast<HANDLE>(write_ptr_index_event_->native_handle())))) {
++          occlusion_wakeup_submission_ = due;
++        }
++      }
++    }
++  }
++  return !occlusion_queries_.empty();
++}
++
++void D3D12CommandProcessor::PublishCompletedOcclusionQueries(uint64_t completed) {
++  occlusion_queries_.Retire(completed, [this](const auto& query) {
++    if (!query.guest_address || !occlusion_query_readback_mapping_) return;
++    auto* counts = memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(
++        query.guest_address);
++    // Do not overwrite an address the guest has already repurposed.
++    const uint32_t finished = rex::byte_swap(0xFFFFFEED);
++    if (counts && (counts->ZPass_A == finished || counts->ZPass_B == finished ||
++                   counts->ZFail_A == finished || counts->ZFail_B == finished)) {
++      WriteGuestOcclusionResult(counts,
++          NormalizeOcclusionSamples(occlusion_query_readback_mapping_[query.index]));
++      ++occlusion_queries_published_;
++    }
++  });
+ }
+ 
+ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
+@@ -2348,6 +2410,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+ 
+   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
++  if (REXCVAR_GET(d3d12_log_depth_state) && frame_current_ % 120 == 0) {
++    REXGPU_INFO("Depth diagnostic frame={} control={:08X} info={:08X} clear={:08X}",
++                frame_current_, normalized_depth_control.value,
++                regs.Get<reg::RB_DEPTH_INFO>().value,
++                regs[XE_GPU_REG_RB_DEPTH_CLEAR]);
++  }
++  if (REXCVAR_GET(d3d12_diagnostic_disable_stencil)) {
++    normalized_depth_control.stencil_enable = 0;
++  }
++  if (REXCVAR_GET(d3d12_diagnostic_disable_depth)) {
++    normalized_depth_control.value = 0;
++  }
+ 
+   // Shader modifications.
+   uint32_t ps_param_gen_pos = UINT32_MAX;
+@@ -2406,6 +2480,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   }
+   if (REXCVAR_GET(async_shader_compilation) &&
+       pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
++    ++async_draws_skipped_;
+     return true;
+   }
+ 
+@@ -2467,6 +2542,15 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+ 
+   // Update viewport, scissor, blend factor and stencil reference.
+   UpdateFixedFunctionState(viewport_info, scissor, primitive_polygonal, normalized_depth_control);
++  if (REXCVAR_GET(d3d12_log_depth_state) && frame_current_ % 120 == 0 &&
++      normalized_depth_control.z_enable) {
++    REXGPU_INFO("Viewport depth frame={} min={} max={} scale={} offset={} zfunc={} zwrite={} "
++                "bound={} format={}", frame_current_, viewport_info.z_min, viewport_info.z_max,
++                viewport_info.ndc_scale[2], viewport_info.ndc_offset[2],
++                uint32_t(normalized_depth_control.zfunc), uint32_t(normalized_depth_control.z_write_enable),
++                bound_depth_and_color_render_target_bits,
++                bound_depth_and_color_render_target_formats[0]);
++  }
+ 
+   // Update system constants before uploading them.
+   // TODO(Triang3l): With ROV, pass the disabled render target mask for safety.
+@@ -3150,6 +3234,7 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+   if (submission_completed_ < await_submission) {
+     REXGPU_ERROR("Failed to await a submission completion Direct3D 12 fence");
+   }
++  PublishCompletedOcclusionQueries(submission_completed_);
+   if (submission_completed_ <= submission_completed_before) {
+     // Not updated - no need to reclaim or download things.
+     return;
+@@ -3399,6 +3484,12 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+ 
+   bool is_closing_frame = is_swap && frame_open_;
+ 
++  if (is_closing_frame && REXCVAR_GET(d3d12_log_perf_counters) && frame_current_ % 60 == 0) {
++    REXGPU_INFO("D3D12 perf frame={} queries_ended={} queries_published={} query_waits={} "
++                "async_draws_skipped={}", frame_current_, occlusion_queries_ended_,
++                occlusion_queries_published_, occlusion_query_waits_, async_draws_skipped_);
++  }
++
+   if (is_closing_frame) {
+     texture_cache_->EndFrame();
+ 
+@@ -3411,6 +3502,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+     if (active_occlusion_query_.valid && occlusion_query_heap_) {
+       deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
+                                          active_occlusion_query_.host_index);
++      occlusion_queries_.Enqueue(active_occlusion_query_.host_index, 0, submission_current_);
+       active_occlusion_query_ = {};
+     }
+ 
+@@ -3503,7 +3595,8 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+ }
+ 
+ bool D3D12CommandProcessor::CanEndSubmissionImmediately() const {
+-  return !submission_open_ || !pipeline_cache_->IsCreatingPipelines();
++  return !submission_open_ || REXCVAR_GET(async_shader_compilation) ||
++         !pipeline_cache_->IsCreatingPipelines();
+ }
+ 
+ void D3D12CommandProcessor::ClearCommandAllocatorCache() {
+@@ -4876,7 +4969,7 @@ ID3D12Resource* D3D12CommandProcessor::RequestReadbackBuffer(uint32_t size) {
+ 
+ bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
+   active_occlusion_query_ = {};
+-  occlusion_query_cursor_ = 0;
++  occlusion_queries_.Reset();
+   occlusion_query_resources_available_ = false;
+   occlusion_query_heap_.Reset();
+   occlusion_query_readback_.Reset();
+@@ -4939,11 +5032,13 @@ void D3D12CommandProcessor::ShutdownOcclusionQueryResources() {
+ }
+ 
+ bool D3D12CommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out) {
+-  if (occlusion_query_cursor_ >= kMaxOcclusionQueries) {
+-    occlusion_query_cursor_ = 0;
+-  }
+-  host_index_out = occlusion_query_cursor_++;
+-  return true;
++  PollPendingWork();
++  if (occlusion_queries_.Acquire(host_index_out)) return true;
++  // Only query-heap exhaustion requires a wait. Never reuse an in-flight slot.
++  if (occlusion_queries_.empty()) return false;
++  ++occlusion_query_waits_;
++  CheckSubmissionFence(occlusion_queries_.oldest_submission());
++  return occlusion_queries_.Acquire(host_index_out);
+ }
+ 
+ void D3D12CommandProcessor::DisableHostOcclusionQueries() {
+@@ -4955,12 +5050,12 @@ void D3D12CommandProcessor::DisableHostOcclusionQueries() {
+     if (BeginSubmission(true)) {
+       deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
+                                          host_index);
++      occlusion_queries_.Enqueue(host_index, 0, submission_current_);
+       EndSubmission(false);
+     }
+   } else {
+     active_occlusion_query_ = {};
+   }
+-  occlusion_query_cursor_ = 0;
+   occlusion_query_resources_available_ = false;
+ }
+ 
+@@ -4980,6 +5075,7 @@ bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addre
+     return false;
+   }
+   if (!BeginSubmission(true)) {
++    occlusion_queries_.Release(host_index);
+     return false;
+   }
+ 
+@@ -5010,12 +5106,20 @@ bool D3D12CommandProcessor::EndGuestOcclusionQuery(
+   deferred_command_list_.D3DResolveQueryData(
+       occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, host_index, 1,
+       occlusion_query_readback_.Get(), sizeof(uint64_t) * host_index);
++  ++occlusion_queries_ended_;
++
++  if (REXCVAR_GET(d3d12_async_occlusion_queries)) {
++    occlusion_queries_.Enqueue(host_index, sample_count_address, submission_current_);
++    // Leave the guest completion sentinel intact until the real result is ready.
++    return true;
++  }
+ 
+   if (!EndSubmission(false)) {
+     return false;
+   }
+ 
+   uint64_t query_submission = submission_current_ ? submission_current_ - 1 : 0;
++  ++occlusion_query_waits_;
+   CheckSubmissionFence(query_submission);
+   if (submission_completed_ < query_submission) {
+     return false;
+@@ -5027,6 +5131,7 @@ bool D3D12CommandProcessor::EndGuestOcclusionQuery(
+   uint64_t samples = occlusion_query_readback_mapping_[host_index];
+   samples = NormalizeOcclusionSamples(samples);
+   WriteGuestOcclusionResult(sample_counts, samples);
++  occlusion_queries_.Release(host_index);
+   return true;
+ }
+ 
+@@ -5051,12 +5156,14 @@ void D3D12CommandProcessor::WriteGuestOcclusionResult(
+   uint32_t clamped = samples > uint64_t(UINT32_MAX) ? UINT32_MAX : uint32_t(samples);
+   sample_counts->Total_A = clamped;
+   sample_counts->Total_B = 0;
+-  sample_counts->ZPass_A = clamped;
+-  sample_counts->ZPass_B = 0;
+-  sample_counts->ZFail_A = 0;
+-  sample_counts->ZFail_B = 0;
+   sample_counts->StencilFail_A = 0;
+   sample_counts->StencilFail_B = 0;
++  // Publish payload before replacing the sentinels the guest polls.
++  std::atomic_thread_fence(std::memory_order_release);
++  sample_counts->ZFail_B = 0;
++  sample_counts->ZFail_A = 0;
++  sample_counts->ZPass_B = 0;
++  sample_counts->ZPass_A = clamped;
+ }
+ 
+ void D3D12CommandProcessor::WriteGammaRampSRV(bool is_pwl,
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index 8e6b854..0cacab9 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -748,10 +748,11 @@ void PipelineCache::ShutdownShaderStorage() {
+ }
+ 
+ void PipelineCache::EndSubmission() {
+-  if (shader_storage_file_flush_needed_ || pipeline_storage_file_flush_needed_) {
++  const bool flush_shaders = shader_storage_file_flush_needed_.exchange(false);
++  if (flush_shaders || pipeline_storage_file_flush_needed_) {
+     {
+       std::lock_guard<std::mutex> lock(storage_write_request_lock_);
+-      if (shader_storage_file_flush_needed_) {
++      if (flush_shaders) {
+         storage_write_flush_shaders_ = true;
+       }
+       if (pipeline_storage_file_flush_needed_) {
+@@ -759,10 +760,16 @@ void PipelineCache::EndSubmission() {
+       }
+     }
+     storage_write_request_cond_.notify_one();
+-    shader_storage_file_flush_needed_ = false;
+     pipeline_storage_file_flush_needed_ = false;
+   }
+   if (!creation_threads_.empty()) {
++    // Async draws only record a pipeline after acquiring its published state.
++    // Pipeline/shader objects live until Shutdown joins all creation workers,
++    // so a submission need not drain unrelated pending compilation.
++    if (REXCVAR_GET(async_shader_compilation)) {
++      creation_request_cond_.notify_all();
++      return;
++    }
+     CreateQueuedPipelinesOnProcessorThread();
+     // Await creation of all queued pipelines.
+     bool await_creation_completion_event;
+@@ -909,8 +916,11 @@ bool PipelineCache::ConfigurePipeline(
+   assert_not_null(pipeline_handle_out);
+   assert_not_null(root_signature_out);
+ 
++  // Bindful root signatures depend on translated bindings and are owned by
++  // the command processor. Keep that path synchronous until its publication
++  // and root-signature cache can be made independent of worker translation.
+   bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
+-                   pixel_shader != nullptr;
++                   bindless_resources_used_;
+ 
+   // Ensure shaders are translated - needed now for GetCurrentStateDescription.
+   // Edge flags are not supported yet (because polygon primitives are not).
+@@ -925,7 +935,7 @@ bool PipelineCache::ConfigurePipeline(
+   if (!vertex_shader->shader().is_ucode_analyzed()) {
+     vertex_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
+   }
+-  if (!vertex_shader->is_translated() && !use_async) {
++  if (!use_async) {
+     std::lock_guard<std::mutex> lock(translation_request_lock_);
+     if (!vertex_shader->is_translated()) {
+       if (!TranslateAnalyzedShader(*shader_translator_, *vertex_shader, dxbc_converter_, dxc_utils_,
+@@ -951,7 +961,7 @@ bool PipelineCache::ConfigurePipeline(
+     return false;
+   }
+   if (pixel_shader != nullptr) {
+-    if (!pixel_shader->is_translated() && !use_async) {
++    if (!use_async) {
+       std::lock_guard<std::mutex> lock(translation_request_lock_);
+       if (!pixel_shader->is_translated()) {
+         pixel_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
+@@ -973,7 +983,7 @@ bool PipelineCache::ConfigurePipeline(
+         }
+       }
+     }
+-    if (pixel_shader->is_translated() && !pixel_shader->is_valid()) {
++    if (!use_async && !pixel_shader->is_valid()) {
+       return false;
+     }
+   }
+@@ -3141,7 +3151,10 @@ bool PipelineCache::PrepareRuntimeDescriptionForQueuedCreation(
+     if (!translation) {
+       return true;
+     }
+-    if (!translation->is_translated()) {
++    {
++      // Protect both the translated flag and the subsequent binding-layout
++      // setup. Another worker may see the binary published before that setup
++      // is finished, so the lock must precede even the readiness check.
+       std::lock_guard<std::mutex> lock(translation_request_lock_);
+       if (!translation->is_translated()) {
+         translation->shader().AnalyzeUcode(ucode_disasm_buffer_);
+diff --git a/src/graphics/pipeline/shader/translator.cpp b/src/graphics/pipeline/shader/translator.cpp
+index e472251..5bc0674 100644
+--- a/src/graphics/pipeline/shader/translator.cpp
++++ b/src/graphics/pipeline/shader/translator.cpp
+@@ -654,7 +654,6 @@ bool ShaderTranslator::TranslateAnalyzedShader(Shader::Translation& translation)
+ 
+   translation.errors_ = std::move(errors_);
+   translation.translated_binary_ = CompleteTranslation();
+-  translation.is_translated_ = true;
+ 
+   bool is_valid = true;
+   for (const auto& error : translation.errors_) {
+@@ -667,6 +666,10 @@ bool ShaderTranslator::TranslateAnalyzedShader(Shader::Translation& translation)
+ 
+   PostTranslation();
+ 
++  // Publish the binary, errors and post-translation state before background
++  // compilation is observed by the command processor.
++  translation.is_translated_.store(true, std::memory_order_release);
++
+   // In case is_valid_ is modified by PostTranslation, reload.
+   return translation.is_valid_;
+ }
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+index c35508e..c14d72f 100644
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -21,6 +21,7 @@ add_executable(unit_tests
+     codegen/codegen_writer_test.cpp
+     codegen/output_partition_test.cpp
+     codegen/output_stamp_test.cpp
++    graphics/occlusion_query_test.cpp
+ )
+ 
+ target_sources(unit_tests PRIVATE
+diff --git a/tests/unit/codegen/codegen_writer_test.cpp b/tests/unit/codegen/codegen_writer_test.cpp
+index 9b4b90c..4d1a80e 100644
+--- a/tests/unit/codegen/codegen_writer_test.cpp
++++ b/tests/unit/codegen/codegen_writer_test.cpp
+@@ -97,6 +97,23 @@ struct WriterFixture {
+ 
+ }  // namespace
+ 
++TEST_CASE("Xenon delay hint emits a host pause rather than a no-op", "[codegen][pause]") {
++  // Xenon's db16cyc encoding (0x7FFFFB78), followed by blr.
++  std::array<uint8_t, 8> data{0x7F, 0xFF, 0xFB, 0x78, 0x4E, 0x80, 0x00, 0x20};
++  TestModule module;
++  module.Load(kBaseAddress, data.data(), data.size());
++  RecompilerConfig config;
++  auto context = CodegenContext::Create(BinaryView::fromModule(module), std::move(config));
++  auto* function = context.graph.addFunction(kBaseAddress, 8, FunctionAuthority::DISCOVERED, true);
++  REQUIRE(function != nullptr);
++  function->discover({{kBaseAddress, 8}}, {}, {});
++  function->seal();
++  EmitContext emit{context.binary(), context.Config(), context.graph};
++  const auto output = function->emitCpp(emit);
++  CHECK(output.find("simde_mm_pause();") != std::string::npos);
++  CHECK(output.find("Sleep") == std::string::npos);
++}
++
+ TEST_CASE("Second write with unchanged inputs writes nothing", "[codegen_writer]") {
+   WriterFixture fx("unchanged");
+ 
+diff --git a/tests/unit/graphics/occlusion_query_test.cpp b/tests/unit/graphics/occlusion_query_test.cpp
+new file mode 100644
+index 0000000..03de49c
+--- /dev/null
++++ b/tests/unit/graphics/occlusion_query_test.cpp
+@@ -0,0 +1,50 @@
++#include <catch2/catch_test_macros.hpp>
++#include <rex/graphics/pipeline/occlusion_query_queue.h>
++#include <vector>
++
++TEST_CASE("Occlusion slots remain reserved until their GPU fence completes", "[occlusion]") {
++  rex::graphics::OcclusionQueryQueue<2> queries;
++  uint32_t first, second, spare;
++  REQUIRE(queries.Acquire(first));
++  REQUIRE(queries.Acquire(second));
++  queries.Enqueue(first, 0x1000, 7);
++  queries.Enqueue(second, 0x2000, 8);
++  REQUIRE_FALSE(queries.Acquire(spare));
++  std::vector<uint32_t> published;
++  auto publish = [&](const auto& query) { published.push_back(query.guest_address); };
++  queries.Retire(6, publish);
++  CHECK(published.empty());
++  CHECK_FALSE(queries.Acquire(spare));
++  queries.Retire(7, publish);
++  REQUIRE(published.size() == 1);
++  CHECK(published[0] == 0x1000);
++  REQUIRE(queries.Acquire(spare));
++  CHECK(spare == first);
++  queries.Retire(8, publish);
++  CHECK(published == std::vector<uint32_t>{0x1000, 0x2000});
++  CHECK(queries.empty());
++}
++
++TEST_CASE("Occlusion batching publishes every result from a completed submission", "[occlusion]") {
++  rex::graphics::OcclusionQueryQueue<3> queries;
++  for (uint32_t address : {0u, 0x1000u, 0x2000u}) {
++    uint32_t index;
++    REQUIRE(queries.Acquire(index));
++    queries.Enqueue(index, address, 4);
++  }
++  CHECK(queries.HasUnsubmitted(4));
++  CHECK_FALSE(queries.HasUnsubmitted(5));
++  unsigned retired = 0;
++  queries.Retire(4, [&](const auto&) { ++retired; });
++  CHECK(retired == 3);
++  CHECK(queries.empty());
++  queries.Retire(5, [&](const auto&) { ++retired; });
++  CHECK(retired == 3);
++  for (unsigned i = 0; i < 3; ++i) {
++    uint32_t index;
++    REQUIRE(queries.Acquire(index));
++  }
++  queries.Reset();
++  uint32_t index;
++  CHECK(queries.Acquire(index));
++}

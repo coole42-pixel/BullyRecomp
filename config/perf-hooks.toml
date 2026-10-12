@@ -3,3 +3,14 @@
 [[midasm_hook]]
 address = 0x828E6D84
 name = "BullyFrameSwapHook"
+
+# Game motion-blur accumulation: r3 becomes gMotionBlurStrength (r3 * 0.005).
+# Keep the game's pass and history bookkeeping intact; only change its strength.
+[[midasm_hook]]
+address = 0x82310DE8
+name = "BullyMotionBlurHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8230F1F0
+name = "BullyMotionBlurStateHook"

@@ -36,6 +36,7 @@ set(BULLYRECOMP_SOURCES
     src/guest_locks.cpp
     src/autoplay.cpp
     src/settings_ini.cpp
+    src/motion_blur.cpp
     src/debug_tools.cpp
 )
 
@@ -86,7 +87,7 @@ endif()
 option(BULLYRECOMP_BUILD_BRANCH_TESTS "Build focused original-XEX branch checks" OFF)
 if(BULLYRECOMP_BUILD_BRANCH_TESTS)
     enable_testing()
-    add_executable(BullyRecomp_branch_tests tools/branch-tests.cpp src/audio_compat.cpp)
+    add_executable(BullyRecomp_branch_tests tools/branch-tests.cpp src/audio_compat.cpp src/motion_blur.cpp)
     target_include_directories(BullyRecomp_branch_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(BullyRecomp_branch_tests PRIVATE BullyRecomp_recomp rex::runtime)
     rexglue_apply_target_settings(BullyRecomp_branch_tests)

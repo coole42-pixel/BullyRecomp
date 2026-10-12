@@ -34,6 +34,8 @@ constexpr const char* kDefaultIni = R"(; BullyRecomp settings
 ; Any other setting can be added too, e.g. keybind_a = Space (see the SDK's flag list).
 
 [Graphics]
+; Game motion blur: false removes accumulated trails; true restores the original effect.
+bully_motion_blur = true
 ; Internal render resolution: 1 (1280x720), 2 (2560x1440), 3 (3840x2160), 4, or max.
 ; Capped at 3840x2160 (4K), so 4 and max both give 3x for this 720p game.
 ; Each step costs a lot of GPU time (2x = 4 times the pixels).
@@ -49,14 +51,18 @@ swap_post_effect = none
 ; Anisotropic filtering: -1 = game setting, 0 = off, 1 = 1x, 2 = 2x, 3 = 4x, 4 = 8x, 5 = 16x
 anisotropic_override = 3
 fullscreen = true
-; Use a 60 Hz fullscreen display mode for even 60 FPS delivery (desktop mode is restored on exit).
+; Use 120 Hz for even 60 FPS delivery and faster panel scanout (desktop mode is restored on exit).
 fullscreen_exclusive = true
-fullscreen_refresh_rate = 60
+fullscreen_refresh_rate = 120
 ; Window size when not fullscreen (0 = default)
 window_width = 0
 window_height = 0
 ; Display VSync: prevents tearing while allowing 60 fps when rendering keeps up.
 d3d12_vsync = true
+; Synchronize each game frame to two display refreshes at 120 Hz (one at 60 Hz).
+d3d12_vsync_frame_rate = 60
+; Request DXGI exclusive fullscreen rather than only changing the desktop display mode.
+d3d12_exclusive_fullscreen = true
 ; Prevent multiple old frames accumulating in the display queue
 d3d12_frame_pacing = true
 ; Allow G-Sync/FreeSync and tearing when display VSync is disabled

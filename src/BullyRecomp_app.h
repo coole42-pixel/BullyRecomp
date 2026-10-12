@@ -81,9 +81,11 @@ class BullyrecompApp : public rex::ReXApp {
       // Requires patches/rexglue-sdk-host-vsync.patch in the local runtime.
       SetDefaultFlag("d3d12_vsync", "true");
       SetDefaultFlag("d3d12_frame_pacing", "true");
+      SetDefaultFlag("d3d12_exclusive_fullscreen", "true");
+      SetDefaultFlag("d3d12_vsync_frame_rate", "60");
       SetDefaultFlag("d3d12_allow_variable_refresh_rate_and_tearing", "false");
       SetDefaultFlag("fullscreen_exclusive", "true");
-      SetDefaultFlag("fullscreen_refresh_rate", "60");
+      SetDefaultFlag("fullscreen_refresh_rate", "120");
       SetDefaultFlag("vsync", "false");
       // A new pipeline otherwise blocks the command processor while it compiles; seen as
       // 0.5-6 s freezes on first visits. Async skips those draws for a few frames instead.
@@ -109,7 +111,9 @@ class BullyrecompApp : public rex::ReXApp {
                             "readback_memexport", "gpu_allow_invalid_fetch_constants", "vsync",
                             "d3d12_vsync",
                             "d3d12_frame_pacing", "fullscreen_exclusive", "fullscreen_refresh_rate",
+                            "d3d12_exclusive_fullscreen", "d3d12_vsync_frame_rate",
                             "bully_fps_limit",
+                            "bully_motion_blur",
                             "d3d12_submit_on_primary_buffer_end", "bully_cs_spin_us",
                             "resolution_scale", "draw_resolution_scale_x",
                             "draw_resolution_scale_y", "mnk_mode", "log_level"}) {

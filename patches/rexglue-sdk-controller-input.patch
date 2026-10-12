@@ -9,11 +9,11 @@ index 0c27eed..dfb23b7 100644
 +#include <mutex>
  #include <utility>
  #include <vector>
- 
+
 @@ -62,9 +63,15 @@ class InputSystem : public system::IInputSystem {
    bool GetVibrationEnabled() const;
    void ToggleVibration();
- 
+
 -  std::bitset<kMaxGuestUsers> GetConnectedUsers() const { return connected_users_; }
 +  std::bitset<kMaxGuestUsers> GetConnectedUsers() const {
 +    std::lock_guard lock(input_mutex_);
@@ -25,7 +25,7 @@ index 0c27eed..dfb23b7 100644
 +    std::lock_guard lock(input_mutex_);
 +    return last_used_user_;
 +  }
- 
+
   private:
    using JoystickValue = std::pair<uint16_t, uint16_t>;
 @@ -101,6 +108,10 @@ class InputSystem : public system::IInputSystem {
@@ -37,14 +37,26 @@ index 0c27eed..dfb23b7 100644
 +  // Packet numbers describe the final guest-visible state, not any one source.
 +  std::array<X_INPUT_STATE, kMaxGuestUsers> guest_states_ = {};
  };
- 
+
  /// Create a default InputSystem with SDL + MnK + NOP drivers.
+diff --git a/include/rex/input/sdl/sdl_input_driver.h b/include/rex/input/sdl/sdl_input_driver.h
+index be1f9b8..b72733c 100644
+--- a/include/rex/input/sdl/sdl_input_driver.h
++++ b/include/rex/input/sdl/sdl_input_driver.h
+@@ -44,6 +44,7 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener
+   void OnWindowAvailable(rex::ui::Window* window) override;
+
+  private:
++  friend struct SDLInputDriverTestAccess;
+   enum class RepeatState {
+     Idle,       // no buttons pressed or repeating has ended
+     Waiting,    // a button is held and the delay is awaited
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
 index 40740ee..2a2f313 100644
 --- a/src/input/input_system.cpp
 +++ b/src/input/input_system.cpp
 @@ -218,6 +218,7 @@ DeviceId InputSystem::ChooseDeviceForUser(uint32_t user_index) const {
- 
+
  X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                        X_INPUT_CAPABILITIES* out_caps) {
 +  std::lock_guard lock(input_mutex_);
@@ -52,7 +64,7 @@ index 40740ee..2a2f313 100644
    if (!out_caps || !assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
 @@ -271,29 +272,38 @@ void InputSystem::UpdateConnectedUser(uint32_t user_index, bool connected) {
- 
+
  X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
    SCOPE_profile_cpu_f("hid");
 -
@@ -67,13 +79,13 @@ index 40740ee..2a2f313 100644
 +    if (out_state) *out_state = {};
 +    return X_ERROR_DEVICE_NOT_CONNECTED;
    }
- 
+
 -  X_RESULT result = GetStateForUI(user_index, out_state);
 +  // A dialog owns the controller.
 +  X_INPUT_STATE state = {};
 +  X_RESULT result = ui_input_blockers_.load() > 0
 +                        ? X_ERROR_SUCCESS : GetStateForUI(user_index, &state);
- 
+
 -  if (result == X_ERROR_SUCCESS && out_state && user_index < kMaxGuestUsers &&
 -      consumed_buttons_[user_index] != 0) {
 -    const uint16_t buttons = out_state->gamepad.buttons;
@@ -84,7 +96,7 @@ index 40740ee..2a2f313 100644
 -    out_state->gamepad.buttons = static_cast<uint16_t>(buttons & ~consumed_buttons_[user_index]);
 +    state.gamepad.buttons = static_cast<uint16_t>(buttons & ~consumed_buttons_[user_index]);
    }
- 
+
 +  if (result != X_ERROR_SUCCESS) state = {};
 +  auto& previous = guest_states_[user_index];
 +  uint32_t packet = previous.packet_number;
@@ -96,7 +108,7 @@ index 40740ee..2a2f313 100644
 +  if (out_state) *out_state = state;
    return result;
  }
- 
+
  X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
 +  std::lock_guard lock(input_mutex_);
    SCOPE_profile_cpu_f("hid");
@@ -104,7 +116,7 @@ index 40740ee..2a2f313 100644
      return X_ERROR_DEVICE_NOT_CONNECTED;
 @@ -343,6 +353,7 @@ void InputSystem::AddUIInputBlocker() {
  }
- 
+
  void InputSystem::RemoveUIInputBlocker() {
 +  std::lock_guard lock(input_mutex_);
    // Whatever is held right now stays masked until released, so the press that
@@ -112,14 +124,14 @@ index 40740ee..2a2f313 100644
    X_INPUT_STATE state = {};
 @@ -416,6 +427,7 @@ X_INPUT_VIBRATION InputSystem::ModifyVibrationLevel(const X_INPUT_VIBRATION* vib
  }
- 
+
  X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
 +  std::lock_guard lock(input_mutex_);
    SCOPE_profile_cpu_f("hid");
    if (!assignment_ || !vibration) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
 @@ -461,6 +473,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
- 
+
  X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                     X_INPUT_KEYSTROKE* out_keystroke) {
 +  std::lock_guard lock(input_mutex_);
@@ -127,12 +139,12 @@ index 40740ee..2a2f313 100644
    if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
 diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
-index 57f65c4..54bb190 100644
+index 57f65c4..cae8edd 100644
 --- a/src/input/sdl/sdl_input_driver.cpp
 +++ b/src/input/sdl/sdl_input_driver.cpp
-@@ -532,12 +532,15 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
+@@ -532,15 +532,47 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
  }
- 
+
  std::unique_lock<std::mutex> SDLInputDriver::DrainAndLock() {
 +  // Serialize extraction as well as application: otherwise two readers can
 +  // replay an older stick event after a newer release, leaving movement stuck.
@@ -147,6 +159,38 @@ index 57f65c4..54bb190 100644
    for (const auto& event : events) {
      ProcessEventLocked(event);
    }
++  // Axis events are notifications, not the authoritative position. Recover
++  // from missed notifications (and axes already held when a pad is opened)
++  // so a rapid direction change cannot leave the guest running on an old axis.
++  // The watch only takes event_queue_mutex_, which is no longer held here.
++  SDL_LockJoysticks();
++  for (auto& controller : controllers_) {
++    auto& pad = controller.state.gamepad;
++    const int16_t lx = SDL_GetGamepadAxis(controller.sdl, SDL_GAMEPAD_AXIS_LEFTX);
++    const int16_t ly =
++        static_cast<int16_t>(~SDL_GetGamepadAxis(controller.sdl, SDL_GAMEPAD_AXIS_LEFTY));
++    const int16_t rx = SDL_GetGamepadAxis(controller.sdl, SDL_GAMEPAD_AXIS_RIGHTX);
++    const int16_t ry =
++        static_cast<int16_t>(~SDL_GetGamepadAxis(controller.sdl, SDL_GAMEPAD_AXIS_RIGHTY));
++    const uint8_t lt = static_cast<uint8_t>(
++        SDL_GetGamepadAxis(controller.sdl, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) >> 7);
++    const uint8_t rt = static_cast<uint8_t>(
++        SDL_GetGamepadAxis(controller.sdl, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) >> 7);
++    if (pad.thumb_lx != lx || pad.thumb_ly != ly || pad.thumb_rx != rx ||
++        pad.thumb_ry != ry || pad.left_trigger != lt || pad.right_trigger != rt) {
++      controller.state_changed = true;
++      pad.thumb_lx = lx;
++      pad.thumb_ly = ly;
++      pad.thumb_rx = rx;
++      pad.thumb_ry = ry;
++      pad.left_trigger = lt;
++      pad.right_trigger = rt;
++    }
++  }
++  SDL_UnlockJoysticks();
+   return guard;
+ }
+
 diff --git a/tests/unit/input/input_assignment_test.cpp b/tests/unit/input/input_assignment_test.cpp
 index 096238d..75510ee 100644
 --- a/tests/unit/input/input_assignment_test.cpp
@@ -154,7 +198,7 @@ index 096238d..75510ee 100644
 @@ -66,6 +66,12 @@ class FakeDriver final : public InputDriver {
      states_[static_cast<DeviceId>(id)].gamepad.buttons = buttons;
    }
- 
+
 +  void SetStick(uint64_t id, int16_t y, uint32_t packet) {
 +    auto& state = states_[static_cast<DeviceId>(id)];
 +    state.gamepad.thumb_ly = y;
@@ -165,9 +209,9 @@ index 096238d..75510ee 100644
      X_INPUT_KEYSTROKE ks = {};
      ks.virtual_key = vk;
 @@ -126,6 +132,51 @@ std::unique_ptr<InputSystem> SharedSystem(FakeDriver** out_driver) {
- 
+
  }  // namespace
- 
+
 +TEST_CASE("Guest packets track stick release despite a larger synthetic packet", "[input]") {
 +  FakeDriver* driver;
 +  auto system = SharedSystem(&driver);
@@ -216,3 +260,125 @@ index 096238d..75510ee 100644
  TEST_CASE("SharedAssignment puts every device on user 0", "[input]") {
    SharedAssignment shared;
    shared.OnDevicesChanged({Pad(10, 0), Pad(11, 1)});
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -18,6 +18,7 @@
+     system/achievement_manager_test.cpp
+     system/function_dispatcher_test.cpp
+     input/input_assignment_test.cpp
++    input/sdl_stick_test.cpp
+     codegen/codegen_writer_test.cpp
+     codegen/output_partition_test.cpp
+     codegen/output_stamp_test.cpp
+@@ -25,6 +26,8 @@
+ )
+
+ target_sources(unit_tests PRIVATE
++    # Use the test executable's SDL instance for the virtual gamepad fixture.
++    ${PROJECT_SOURCE_DIR}/src/input/sdl/sdl_input_driver.cpp
+     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/ui.cpp
+     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/progress.cpp
+ )
+diff --git a/tests/unit/input/sdl_stick_test.cpp b/tests/unit/input/sdl_stick_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/input/sdl_stick_test.cpp
+@@ -0,0 +1,97 @@
++#include <catch2/catch_test_macros.hpp>
++#include <rex/input/sdl/sdl_input_driver.h>
++
++namespace rex::input::sdl {
++
++struct SDLInputDriverTestAccess {
++  static void Open(SDLInputDriver& driver, SDL_JoystickID id) {
++    driver.sdl_events_initialized_ = true;
++    driver.SDL_Gamepad_initialized_ = true;
++    // The fixture pumps SDL itself; no window or UI dispatch is needed.
++    driver.sdl_pumpevents_queued_ = true;
++    SDL_Event event{};
++    event.type = SDL_EVENT_GAMEPAD_ADDED;
++    event.gdevice.which = id;
++    driver.HandleEvent(event);
++  }
++  static void RunButton(SDLInputDriver& driver, SDL_JoystickID id) {
++    SDL_Event event{};
++    event.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
++    event.gbutton.which = id;
++    event.gbutton.button = SDL_GAMEPAD_BUTTON_SOUTH;
++    event.gbutton.down = true;
++    driver.HandleEvent(event);
++  }
++  static void InitialForward(SDLInputDriver& driver, SDL_JoystickID id) {
++    SDL_Event event{};
++    event.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
++    event.gaxis.which = id;
++    event.gaxis.axis = SDL_GAMEPAD_AXIS_LEFTY;
++    event.gaxis.value = -32768;
++    driver.HandleEvent(event);
++  }
++  static void Close(SDLInputDriver& driver) {
++    for (auto& controller : driver.controllers_) SDL_CloseGamepad(controller.sdl);
++    driver.controllers_.clear();
++  }
++};
++
++}  // namespace rex::input::sdl
++
++TEST_CASE("SDL stick reversals recover missed axis events while run is held", "[input][sdl]") {
++  using rex::X_RESULT;
++  using namespace rex::input;
++  using namespace rex::input::sdl;
++  REQUIRE(SDL_InitSubSystem(SDL_INIT_GAMEPAD));
++  struct QuitSDL {
++    ~QuitSDL() { SDL_QuitSubSystem(SDL_INIT_GAMEPAD); }
++  } quit;
++  SDL_VirtualJoystickDesc desc{};
++  SDL_INIT_INTERFACE(&desc);
++  desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
++  desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
++  desc.nbuttons = 15;
++  desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
++  desc.button_mask = (1u << 15) - 1;
++  desc.name = "Bully turn regression pad";
++  const auto id = SDL_AttachVirtualJoystick(&desc);
++  REQUIRE(id != 0);
++  struct Detach {
++    SDL_JoystickID id;
++    ~Detach() { SDL_DetachVirtualJoystick(id); }
++  } detach{id};
++  SDLInputDriver driver(nullptr, 0);
++  SDLInputDriverTestAccess::Open(driver, id);
++  struct CloseDriver {
++    SDLInputDriver& driver;
++    ~CloseDriver() { SDLInputDriverTestAccess::Close(driver); }
++  } close{driver};
++  std::vector<DeviceInfo> devices;
++  driver.EnumerateDevices(devices);
++  REQUIRE(devices.size() == 1);
++  auto* joystick = SDL_GetJoystickFromID(id);
++  REQUIRE(joystick != nullptr);
++  REQUIRE(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, true));
++  SDLInputDriverTestAccess::RunButton(driver, id);
++  SDLInputDriverTestAccess::InitialForward(driver, id);
++  X_INPUT_STATE state{};
++  uint32_t last_packet = 0;
++  // After starting forward, no axis notifications are forwarded. SDL has the
++  // authoritative positions, including a turn without releasing the stick.
++  const int16_t positions[][2] = {
++      {0, -32768}, {-32768, -24000}, {32767, -24000},
++      {-32768, 0}, {32767, 0}, {0, 0}};
++  for (const auto& position : positions) {
++    REQUIRE(SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, position[0]));
++    REQUIRE(SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, position[1]));
++    SDL_UpdateJoysticks();
++    REQUIRE(driver.GetDeviceState(devices[0].id, &state) == X_ERROR_SUCCESS);
++    REQUIRE(static_cast<int16_t>(state.gamepad.thumb_lx) == position[0]);
++    REQUIRE(static_cast<int16_t>(state.gamepad.thumb_ly) == static_cast<int16_t>(~position[1]));
++    REQUIRE((state.gamepad.buttons & X_INPUT_GAMEPAD_A) != 0);
++    REQUIRE(static_cast<uint32_t>(state.packet_number) != last_packet);
++    last_packet = state.packet_number;
++    REQUIRE(driver.GetDeviceState(devices[0].id, &state) == X_ERROR_SUCCESS);
++    REQUIRE(static_cast<uint32_t>(state.packet_number) == last_packet);
++  }
++}

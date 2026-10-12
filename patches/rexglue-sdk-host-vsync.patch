@@ -1,20 +1,23 @@
 diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
-index 83d09f7..c5ef438 100644
+index 83d09f7..749dd4f 100644
 --- a/include/rex/ui/d3d12/d3d12_presenter.h
 +++ b/include/rex/ui/d3d12/d3d12_presenter.h
-@@ -251,6 +251,7 @@ class D3D12Presenter final : public Presenter {
+@@ -251,6 +251,10 @@ class D3D12Presenter final : public Presenter {
      uint32_t swap_chain_width = 0;
      uint32_t swap_chain_height = 0;
      bool swap_chain_allows_tearing = false;
 +    HANDLE frame_latency_waitable = nullptr;
++    HWND hwnd = nullptr;
++    UINT swap_chain_flags = 0;
++    UINT vsync_interval = 1;
      Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain;
      std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kSwapChainBufferCount> swap_chain_buffers;
    };
 diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
-index 306118e..d91a221 100644
+index 306118e..9a69552 100644
 --- a/src/ui/d3d12/d3d12_presenter.cpp
 +++ b/src/ui/d3d12/d3d12_presenter.cpp
-@@ -32,6 +32,11 @@
+@@ -32,9 +32,39 @@
  
  REXCVAR_DEFINE_BOOL(d3d12_allow_variable_refresh_rate_and_tearing, true, "UI/D3D12",
                      "Allow variable refresh rate and tearing");
@@ -23,43 +26,77 @@ index 306118e..d91a221 100644
 +REXCVAR_DEFINE_BOOL(d3d12_frame_pacing, false, "UI/D3D12",
 +                    "Wait for presentation queue capacity before drawing (one queued frame)")
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(d3d12_exclusive_fullscreen, false, "UI/D3D12",
++                    "Use DXGI exclusive fullscreen when the window is fullscreen")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_DOUBLE(d3d12_vsync_frame_rate, 0.0, "UI/D3D12",
++                      "Target synchronized frame rate (0 = one display refresh per present)")
++    .range(0.0, 240.0)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
  
  namespace rex::ui::d3d12 {
  
-@@ -350,7 +355,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
++namespace {
++UINT GetVSyncInterval(HWND hwnd) {
++  const double target = REXCVAR_GET(d3d12_vsync_frame_rate);
++  if (target <= 0.0) return 1;
++  MONITORINFOEXW monitor = {};
++  monitor.cbSize = sizeof(monitor);
++  DEVMODEW mode = {};
++  mode.dmSize = sizeof(mode);
++  if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor) ||
++      !EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return 1;
++  const double intervals = double(mode.dmDisplayFrequency) / target;
++  const UINT rounded = UINT(std::clamp(std::round(intervals), 1.0, 4.0));
++  // Only use multiples that match the producer cadence, e.g. two refreshes at
++  // 120 Hz for 60 FPS. A non-multiple such as 144 Hz must not cap the game to 48.
++  return std::abs(intervals - double(rounded)) < 0.03 ? rounded : 1;
++}
++}  // namespace
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_dither_ps.h"
+@@ -350,7 +380,8 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
    if (paint_context_.swap_chain) {
      if (was_paintable && paint_context_.swap_chain_width == new_swap_chain_width &&
          paint_context_.swap_chain_height == new_swap_chain_height) {
 -      is_vsync_implicit_out = false;
++      paint_context_.vsync_interval = GetVSyncInterval(paint_context_.hwnd);
 +      is_vsync_implicit_out = REXCVAR_GET(d3d12_vsync);
        return SurfacePaintConnectResult::kSuccessUnchanged;
      }
      paint_context_.AwaitSwapChainUsageCompletion();
-@@ -363,7 +368,9 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+@@ -363,7 +394,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
      }
      bool swap_chain_resized = SUCCEEDED(paint_context_.swap_chain->ResizeBuffers(
          0, UINT(new_swap_chain_width), UINT(new_swap_chain_height), DXGI_FORMAT_UNKNOWN,
 -        paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0));
-+        (paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) |
-+            (paint_context_.frame_latency_waitable
-+                 ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0)));
++        paint_context_.swap_chain_flags));
      if (swap_chain_resized) {
        for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
          if (FAILED(paint_context_.swap_chain->GetBuffer(
-@@ -408,6 +415,9 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+@@ -408,6 +439,12 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
      swap_chain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
      swap_chain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
      swap_chain_desc.Flags = 0;
 +    if (REXCVAR_GET(d3d12_frame_pacing)) {
 +      swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 +    }
++    if (REXCVAR_GET(d3d12_exclusive_fullscreen)) {
++      swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
++    }
      if (REXCVAR_GET(d3d12_allow_variable_refresh_rate_and_tearing) && dxgi_supports_tearing_) {
        // Allow tearing in borderless fullscreen to support variable refresh
        // rate.
-@@ -450,6 +460,15 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+@@ -450,6 +487,50 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
      paint_context_.swap_chain_height = new_swap_chain_height;
      paint_context_.swap_chain_allows_tearing =
          (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
++    paint_context_.swap_chain_flags = swap_chain_desc.Flags;
++    if (surface_type == Surface::kTypeIndex_Win32Hwnd) {
++      paint_context_.hwnd = static_cast<const Win32HwndSurface&>(new_surface).hwnd();
++    }
 +    if (REXCVAR_GET(d3d12_frame_pacing)) {
 +      if (FAILED(paint_context_.swap_chain->SetMaximumFrameLatency(1)) ||
 +          !(paint_context_.frame_latency_waitable =
@@ -69,24 +106,61 @@ index 306118e..d91a221 100644
 +        return SurfacePaintConnectResult::kFailure;
 +      }
 +    }
++    if (REXCVAR_GET(d3d12_exclusive_fullscreen) && rex::cvar::Query<bool>("fullscreen") &&
++        !paint_context_.swap_chain_allows_tearing) {
++      const HRESULT exclusive_result = paint_context_.swap_chain->SetFullscreenState(TRUE, nullptr);
++      if (SUCCEEDED(exclusive_result)) {
++        DXGI_MODE_DESC target = {};
++        target.Width = new_swap_chain_width;
++        target.Height = new_swap_chain_height;
++        target.Format = kSwapChainFormat;
++        const double requested_hz = rex::cvar::Query<double>("fullscreen_refresh_rate");
++        target.RefreshRate.Numerator = UINT(std::round(requested_hz * 1000.0));
++        target.RefreshRate.Denominator = requested_hz > 0.0 ? 1000 : 0;
++        if (FAILED(paint_context_.swap_chain->ResizeTarget(&target))) {
++          REXLOG_WARN("D3D12Presenter: requested exclusive display mode unavailable");
++        }
++        // Flip-model chains must resize after entering DXGI exclusive mode.
++        if (FAILED(paint_context_.swap_chain->ResizeBuffers(
++                0, new_swap_chain_width, new_swap_chain_height, DXGI_FORMAT_UNKNOWN,
++                paint_context_.swap_chain_flags))) {
++          paint_context_.DestroySwapChain();
++          return SurfacePaintConnectResult::kFailure;
++        }
++        REXLOG_INFO("D3D12Presenter: DXGI exclusive fullscreen enabled");
++      } else {
++        REXLOG_WARN("D3D12Presenter: DXGI exclusive fullscreen unavailable (0x{:08X}); "
++                    "retaining synchronized windowed presentation", uint32_t(exclusive_result));
++      }
++    }
++    paint_context_.vsync_interval = GetVSyncInterval(paint_context_.hwnd);
++    REXLOG_INFO("D3D12Presenter: display VSync={}, interval={}, tearing={}",
++                REXCVAR_GET(d3d12_vsync), paint_context_.vsync_interval,
++                paint_context_.swap_chain_allows_tearing);
      for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
        if (FAILED(paint_context_.swap_chain->GetBuffer(
                i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])))) {
-@@ -478,7 +497,9 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+@@ -478,7 +559,10 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
          provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexSwapChainBuffer0 + i));
    }
  
 -  is_vsync_implicit_out = false;
 +  // Presentation already throttles the UI: don't also wait on the separate
 +  // monitor-tick worker, which can make an otherwise ready frame miss a vblank.
++  paint_context_.vsync_interval = GetVSyncInterval(paint_context_.hwnd);
 +  is_vsync_implicit_out = REXCVAR_GET(d3d12_vsync);
    return SurfacePaintConnectResult::kSuccess;
  }
  
-@@ -549,12 +570,22 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+@@ -548,13 +632,27 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+   for (Microsoft::WRL::ComPtr<ID3D12Resource>& swap_chain_buffer_ref : swap_chain_buffers) {
      swap_chain_buffer_ref.Reset();
    }
++  swap_chain->SetFullscreenState(FALSE, nullptr);
    swap_chain.Reset();
++  hwnd = nullptr;
++  swap_chain_flags = 0;
++  vsync_interval = 1;
 +  if (frame_latency_waitable) {
 +    CloseHandle(frame_latency_waitable);
 +    frame_latency_waitable = nullptr;
@@ -106,7 +180,7 @@ index 306118e..d91a221 100644
    // Begin the command list with the command allocator not currently potentially
    // used on the GPU.
    UINT64 current_paint_submission = paint_context_.paint_submission_tracker.GetCurrentSubmission();
-@@ -1147,17 +1178,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -1147,17 +1245,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
      ui_submission_tracker_.NextSubmission();
    }
    paint_context_.paint_submission_tracker.NextSubmission();
@@ -124,7 +198,7 @@ index 306118e..d91a221 100644
    HRESULT present_result = paint_context_.swap_chain->Present(
 -      0, DXGI_PRESENT_RESTART |
 -             (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
-+      host_vsync ? 1 : 0,
++      host_vsync ? paint_context_.vsync_interval : 0,
 +      host_vsync ? 0 : (DXGI_PRESENT_RESTART |
 +                        (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0)));
    // Even if presentation has failed, work might have been enqueued anyway

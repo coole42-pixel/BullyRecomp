@@ -58,10 +58,15 @@ them. Command-line flags override the INI, and unknown keys are reported in the 
 **Display VSync** (`d3d12_vsync = true` under `[Graphics]`) is enabled by default.
 `d3d12_frame_pacing = true` keeps only one frame queued for presentation, and
 `bully_fps_limit = 60` limits new game frames to a steady cadence without catch-up bursts.
-Fullscreen uses `fullscreen_exclusive = true` and `fullscreen_refresh_rate = 60`
-to request a 60 Hz display mode; the desktop mode is restored when fullscreen ends.
+Fullscreen uses `fullscreen_exclusive = true` and `fullscreen_refresh_rate = 120`
+to request a 120 Hz display mode; the desktop mode is restored when fullscreen ends.
+`d3d12_exclusive_fullscreen = true` also puts DXGI into exclusive fullscreen, with
+`d3d12_vsync_frame_rate = 60` selecting two display refreshes per game frame at 120 Hz.
+The interval is based on the actual display mode, so a 60 Hz mode uses one refresh.
 Set `fullscreen_exclusive = false` to use borderless fullscreen at the desktop refresh rate,
-or set `fullscreen_refresh_rate = 120` for a compatible 120 Hz display.
+and set `d3d12_exclusive_fullscreen = false` too. Set `fullscreen_refresh_rate = 60`
+for a display that does not support 120 Hz. If DXGI exclusive mode is unavailable,
+the renderer retains synchronized windowed presentation and reports the fallback.
 The separate SDK `vsync = false` setting under `[Performance]` controls guest console
 timing; enabling it can drop busy scenes to 30 FPS. Reaching 60 FPS still requires
 enough GPU performance; use 1x resolution for the best chance. A 60 Hz or 120 Hz
@@ -71,6 +76,14 @@ display synchronization; VRR/tearing is separately opt-in with
 the game frame limit. The presentation and fullscreen refresh settings require the local
 runtime patches `patches/rexglue-sdk-host-vsync.patch` and
 `patches/rexglue-sdk-fullscreen-refresh.patch`.
+
+**Motion blur** (`bully_motion_blur` under `[Graphics]`): set `false` to zero the
+game's motion-blur accumulation strength, or `true` for the original effect. The
+first-run default is `true`; this option also appears in the F4 settings overlay.
+It changes the game effect while preserving its render pass and history bookkeeping.
+Driver frame generation is separate: NVIDIA Smooth Motion can produce doubled moving
+edges even while the game's blur is off. Disable Smooth Motion for BullyRecomp in
+the NVIDIA application profile if this occurs.
 
 **Resolution scale** (`resolution_scale` under `[Graphics]`): `1` (1280x720), `2`
 (2560x1440), `3` (3840x2160), `4` or `max`. The output is capped at 4K, so for this 720p game
@@ -225,6 +238,9 @@ These patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as t
   waitable swap chain with one queued frame, preserving its flags across resize and
   closing its handle on teardown. Synchronized presentation disables the separate UI
   tick wait. Tearing is disabled during synchronized presents.
+  It also supports DXGI exclusive fullscreen and a VSync interval matched to the
+  requested frame rate and actual display refresh, preserving all swap-chain flags
+  across resize and returning to windowed mode during teardown.
 - `patches/rexglue-sdk-fullscreen-refresh.patch` (runtime): adds
   `fullscreen_refresh_rate` so exclusive fullscreen can use a 60 Hz mode rather than
   the desktop's 144 Hz cadence. This is separate from guest `video_mode_refresh_rate`.
@@ -232,7 +248,9 @@ These patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as t
   and SDL event draining so older stick events cannot overwrite a newer release. Guest
   packet numbers now follow the final merged input, including dialog neutralization and
   disconnects, so keyboard packet counters cannot hide controller changes. Includes
-  regression tests for stick release, dialog blocking/resume, and disconnect clearing.
+  a current SDL axis snapshot on every read so missed motion events cannot leave an
+  old running direction cached. Regression tests cover rapid left/right reversals
+  while A is held, stick release, dialog blocking/resume, and disconnect clearing.
 
 The local `BullyRecomp.ini` now uses `resolution_scale=1`, matching first-run defaults. The INI
 is ignored by Git; higher scales remain opt-in quality settings. ROV remains the render-target

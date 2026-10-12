@@ -55,6 +55,23 @@ SDK `0.10.0.24-dev.gbd833a2` installed at `../rexglue` (next to this folder), an
 Keys are setting names (any SDK flag works, e.g. `keybind_a = Space`); `[sections]` only group
 them. Command-line flags override the INI, and unknown keys are reported in the log.
 
+**Display VSync** (`d3d12_vsync = true` under `[Graphics]`) is enabled by default.
+`d3d12_frame_pacing = true` keeps only one frame queued for presentation, and
+`bully_fps_limit = 60` limits new game frames to a steady cadence without catch-up bursts.
+Fullscreen uses `fullscreen_exclusive = true` and `fullscreen_refresh_rate = 60`
+to request a 60 Hz display mode; the desktop mode is restored when fullscreen ends.
+Set `fullscreen_exclusive = false` to use borderless fullscreen at the desktop refresh rate,
+or set `fullscreen_refresh_rate = 120` for a compatible 120 Hz display.
+The separate SDK `vsync = false` setting under `[Performance]` controls guest console
+timing; enabling it can drop busy scenes to 30 FPS. Reaching 60 FPS still requires
+enough GPU performance; use 1x resolution for the best chance. A 60 Hz or 120 Hz
+display mode gives an even cadence for 60 FPS. Set `d3d12_vsync = false` to disable
+display synchronization; VRR/tearing is separately opt-in with
+`d3d12_allow_variable_refresh_rate_and_tearing = true`. `bully_fps_limit = 0` disables
+the game frame limit. The presentation and fullscreen refresh settings require the local
+runtime patches `patches/rexglue-sdk-host-vsync.patch` and
+`patches/rexglue-sdk-fullscreen-refresh.patch`.
+
 **Resolution scale** (`resolution_scale` under `[Graphics]`): `1` (1280x720), `2`
 (2560x1440), `3` (3840x2160), `4` or `max`. The output is capped at 4K, so for this 720p game
 `4` and `max` give 3x; the log states the resolution used. Each step is expensive on the GPU
@@ -180,7 +197,7 @@ minimized window presents nothing. A real controller still works on top of the s
 
 ## Local SDK runtime
 
-Two patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as the installed SDK):
+These patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as the installed SDK):
 
 - `patches/rexglue-sdk-scaled-compressed-textures.patch` (GPU plugin): with resolution scaling,
   pages once written by a render-to-texture copy stay marked "scaled" after the game reuses the
@@ -196,6 +213,21 @@ Two patches apply to a rexglue-sdk checkout at `bd833a2` (the same commit as the
 - `patches/rexglue-sdk-timer-queue.patch` (runtime), with unit tests: the timer queue thread
   never blocked; it spun through `_mm_pause`/yield waiting for the 1 ms `KeTimeStampBundle` tick
   (15-65% of a core). It now waits on a high-resolution waitable timer.
+
+- `patches/rexglue-sdk-host-vsync.patch` (runtime): adds `d3d12_vsync` to synchronize
+  display presentation independently of guest console timing. Bully enables it by default
+  while keeping guest `vsync` off for 60 FPS. Also adds `d3d12_frame_pacing`: a DXGI
+  waitable swap chain with one queued frame, preserving its flags across resize and
+  closing its handle on teardown. Synchronized presentation disables the separate UI
+  tick wait. Tearing is disabled during synchronized presents.
+- `patches/rexglue-sdk-fullscreen-refresh.patch` (runtime): adds
+  `fullscreen_refresh_rate` so exclusive fullscreen can use a 60 Hz mode rather than
+  the desktop's 144 Hz cadence. This is separate from guest `video_mode_refresh_rate`.
+- `patches/rexglue-sdk-controller-input.patch` (runtime): serializes UI/guest input reads
+  and SDL event draining so older stick events cannot overwrite a newer release. Guest
+  packet numbers now follow the final merged input, including dialog neutralization and
+  disconnects, so keyboard packet counters cannot hide controller changes. Includes
+  regression tests for stick release, dialog blocking/resume, and disconnect clearing.
 
 Build them and stage the DLLs over the prebuilt ones:
 

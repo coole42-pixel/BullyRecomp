@@ -1,0 +1,218 @@
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 0c27eed..dfb23b7 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -14,6 +14,7 @@
+ #include <atomic>
+ #include <bitset>
+ #include <memory>
++#include <mutex>
+ #include <utility>
+ #include <vector>
+ 
+@@ -62,9 +63,15 @@ class InputSystem : public system::IInputSystem {
+   bool GetVibrationEnabled() const;
+   void ToggleVibration();
+ 
+-  std::bitset<kMaxGuestUsers> GetConnectedUsers() const { return connected_users_; }
++  std::bitset<kMaxGuestUsers> GetConnectedUsers() const {
++    std::lock_guard lock(input_mutex_);
++    return connected_users_;
++  }
+   /// Guest user whose device most recently produced a button press.
+-  uint32_t GetLastUsedUser() const { return last_used_user_; }
++  uint32_t GetLastUsedUser() const {
++    std::lock_guard lock(input_mutex_);
++    return last_used_user_;
++  }
+ 
+  private:
+   using JoystickValue = std::pair<uint16_t, uint16_t>;
+@@ -101,6 +108,10 @@ class InputSystem : public system::IInputSystem {
+   std::atomic<int> ui_input_blockers_{0};
+   // Masked out per user until the guest sees them released.
+   std::array<uint16_t, kMaxGuestUsers> consumed_buttons_ = {};
++  // UI and guest threads both poll the same assignment and driver state.
++  mutable std::recursive_mutex input_mutex_;
++  // Packet numbers describe the final guest-visible state, not any one source.
++  std::array<X_INPUT_STATE, kMaxGuestUsers> guest_states_ = {};
+ };
+ 
+ /// Create a default InputSystem with SDL + MnK + NOP drivers.
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 40740ee..2a2f313 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -218,6 +218,7 @@ DeviceId InputSystem::ChooseDeviceForUser(uint32_t user_index) const {
+ 
+ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+                                       X_INPUT_CAPABILITIES* out_caps) {
++  std::lock_guard lock(input_mutex_);
+   SCOPE_profile_cpu_f("hid");
+   if (!out_caps || !assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+@@ -271,29 +272,38 @@ void InputSystem::UpdateConnectedUser(uint32_t user_index, bool connected) {
+ 
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   SCOPE_profile_cpu_f("hid");
+-
+-  // A dialog owns the controller.
+-  if (ui_input_blockers_.load() > 0) {
+-    if (out_state) {
+-      std::memset(out_state, 0, sizeof(*out_state));
+-    }
+-    return X_ERROR_SUCCESS;
++  std::lock_guard lock(input_mutex_);
++  if (user_index >= kMaxGuestUsers) {
++    if (out_state) *out_state = {};
++    return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+ 
+-  X_RESULT result = GetStateForUI(user_index, out_state);
++  // A dialog owns the controller.
++  X_INPUT_STATE state = {};
++  X_RESULT result = ui_input_blockers_.load() > 0
++                        ? X_ERROR_SUCCESS : GetStateForUI(user_index, &state);
+ 
+-  if (result == X_ERROR_SUCCESS && out_state && user_index < kMaxGuestUsers &&
+-      consumed_buttons_[user_index] != 0) {
+-    const uint16_t buttons = out_state->gamepad.buttons;
++  if (result == X_ERROR_SUCCESS && consumed_buttons_[user_index] != 0) {
++    const uint16_t buttons = state.gamepad.buttons;
+     // Each button leaves the mask once the player lets go of it.
+     consumed_buttons_[user_index] &= buttons;
+-    out_state->gamepad.buttons = static_cast<uint16_t>(buttons & ~consumed_buttons_[user_index]);
++    state.gamepad.buttons = static_cast<uint16_t>(buttons & ~consumed_buttons_[user_index]);
+   }
+ 
++  if (result != X_ERROR_SUCCESS) state = {};
++  auto& previous = guest_states_[user_index];
++  uint32_t packet = previous.packet_number;
++  if (std::memcmp(&previous.gamepad, &state.gamepad, sizeof(state.gamepad)) != 0) {
++    ++packet;
++  }
++  state.packet_number = packet;
++  previous = state;
++  if (out_state) *out_state = state;
+   return result;
+ }
+ 
+ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
++  std::lock_guard lock(input_mutex_);
+   SCOPE_profile_cpu_f("hid");
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+@@ -343,6 +353,7 @@ void InputSystem::AddUIInputBlocker() {
+ }
+ 
+ void InputSystem::RemoveUIInputBlocker() {
++  std::lock_guard lock(input_mutex_);
+   // Whatever is held right now stays masked until released, so the press that
+   // dismissed the dialog is not also read as a press in the game.
+   X_INPUT_STATE state = {};
+@@ -416,6 +427,7 @@ X_INPUT_VIBRATION InputSystem::ModifyVibrationLevel(const X_INPUT_VIBRATION* vib
+ }
+ 
+ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
++  std::lock_guard lock(input_mutex_);
+   SCOPE_profile_cpu_f("hid");
+   if (!assignment_ || !vibration) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+@@ -461,6 +473,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+ 
+ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
+                                    X_INPUT_KEYSTROKE* out_keystroke) {
++  std::lock_guard lock(input_mutex_);
+   SCOPE_profile_cpu_f("hid");
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
+index 57f65c4..54bb190 100644
+--- a/src/input/sdl/sdl_input_driver.cpp
++++ b/src/input/sdl/sdl_input_driver.cpp
+@@ -532,12 +532,15 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
+ }
+ 
+ std::unique_lock<std::mutex> SDLInputDriver::DrainAndLock() {
++  // Serialize extraction as well as application: otherwise two readers can
++  // replay an older stick event after a newer release, leaving movement stuck.
++  // The event watch takes only event_queue_mutex_, never controllers_mutex_.
++  std::unique_lock<std::mutex> guard(controllers_mutex_);
+   std::vector<SDL_Event> events;
+   {
+     std::lock_guard<std::mutex> guard(event_queue_mutex_);
+     events.swap(pending_events_);
+   }
+-  std::unique_lock<std::mutex> guard(controllers_mutex_);
+   for (const auto& event : events) {
+     ProcessEventLocked(event);
+   }
+diff --git a/tests/unit/input/input_assignment_test.cpp b/tests/unit/input/input_assignment_test.cpp
+index 096238d..75510ee 100644
+--- a/tests/unit/input/input_assignment_test.cpp
++++ b/tests/unit/input/input_assignment_test.cpp
+@@ -66,6 +66,12 @@ class FakeDriver final : public InputDriver {
+     states_[static_cast<DeviceId>(id)].gamepad.buttons = buttons;
+   }
+ 
++  void SetStick(uint64_t id, int16_t y, uint32_t packet) {
++    auto& state = states_[static_cast<DeviceId>(id)];
++    state.gamepad.thumb_ly = y;
++    state.packet_number = packet;
++  }
++
+   void QueueKeystroke(uint64_t id, uint16_t vk) {
+     X_INPUT_KEYSTROKE ks = {};
+     ks.virtual_key = vk;
+@@ -126,6 +132,51 @@ std::unique_ptr<InputSystem> SharedSystem(FakeDriver** out_driver) {
+ 
+ }  // namespace
+ 
++TEST_CASE("Guest packets track stick release despite a larger synthetic packet", "[input]") {
++  FakeDriver* driver;
++  auto system = SharedSystem(&driver);
++  driver->Add(10);
++  driver->Add(11, true);
++  driver->SetStick(10, 32767, 1);
++  driver->SetStick(11, 0, 10000);
++  X_INPUT_STATE state = {};
++  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
++  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_ly) == 32767);
++  const uint32_t moving = state.packet_number;
++  driver->SetStick(10, 0, 2);
++  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
++  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_ly) == 0);
++  REQUIRE(static_cast<uint32_t>(state.packet_number) != moving);
++  const uint32_t released = state.packet_number;
++  driver->SetStick(11, 0, 10001);
++  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
++  REQUIRE(static_cast<uint32_t>(state.packet_number) == released);
++}
++
++TEST_CASE("Dialog and disconnect clear movement with a new guest packet", "[input]") {
++  FakeDriver* driver;
++  auto system = SharedSystem(&driver);
++  driver->Add(10);
++  driver->SetStick(10, 32767, 1);
++  X_INPUT_STATE state = {};
++  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
++  const uint32_t moving = state.packet_number;
++  system->AddUIInputBlocker();
++  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
++  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_ly) == 0);
++  REQUIRE(static_cast<uint32_t>(state.packet_number) != moving);
++  const uint32_t blocked = state.packet_number;
++  system->RemoveUIInputBlocker();
++  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
++  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_ly) == 32767);
++  REQUIRE(static_cast<uint32_t>(state.packet_number) != blocked);
++  const uint32_t resumed = state.packet_number;
++  driver->Remove(10);
++  REQUIRE(system->GetState(0, &state) == X_ERROR_DEVICE_NOT_CONNECTED);
++  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_ly) == 0);
++  REQUIRE(static_cast<uint32_t>(state.packet_number) != resumed);
++}
++
+ TEST_CASE("SharedAssignment puts every device on user 0", "[input]") {
+   SharedAssignment shared;
+   shared.OnDevicesChanged({Pad(10, 0), Pad(11, 1)});

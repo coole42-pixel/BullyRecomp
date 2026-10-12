@@ -1,0 +1,41 @@
+diff --git a/include/rex/ui/flags.h b/include/rex/ui/flags.h
+index 5372383..20cfcdb 100644
+--- a/include/rex/ui/flags.h
++++ b/include/rex/ui/flags.h
+@@ -30,6 +30,7 @@ REXCVAR_DECLARE(int32_t, window_width);
+ REXCVAR_DECLARE(int32_t, window_height);
+ REXCVAR_DECLARE(bool, fullscreen);
+ REXCVAR_DECLARE(bool, fullscreen_exclusive);
++REXCVAR_DECLARE(double, fullscreen_refresh_rate);
+ REXCVAR_DECLARE(int32_t, monitor);
+ REXCVAR_DECLARE(std::string, video_driver);
+ 
+diff --git a/src/ui/window.cpp b/src/ui/window.cpp
+index 7795c1e..616d1be 100644
+--- a/src/ui/window.cpp
++++ b/src/ui/window.cpp
+@@ -38,6 +38,10 @@ REXCVAR_DEFINE_BOOL(fullscreen, true, "UI/Window", "Start the window in fullscre
+ REXCVAR_DEFINE_BOOL(fullscreen_exclusive, false, "UI/Window",
+                     "Switch the display mode in fullscreen instead of going "
+                     "borderless at the desktop mode");
++REXCVAR_DEFINE_DOUBLE(fullscreen_refresh_rate, 0.0, "UI/Window",
++                      "Exclusive fullscreen refresh rate in Hz (0 = desktop refresh)")
++    .range(0.0, 360.0)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
+                      "Monitor index to display on (0 = default, 1 = primary, 2 = "
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 6782cce..78b8495 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -333,7 +333,8 @@ void WindowSDL::ApplyFullscreenModeNow() {
+   }
+ 
+   SDL_DisplayMode mode = {};
+-  if (!SDL_GetClosestFullscreenDisplayMode(display, width, height, 0.0f, true, &mode)) {
++  const float refresh_rate = static_cast<float>(REXCVAR_GET(fullscreen_refresh_rate));
++  if (!SDL_GetClosestFullscreenDisplayMode(display, width, height, refresh_rate, true, &mode)) {
+     REXLOG_WARN("Display {} has no mode near {}x{}: staying borderless", uint32_t(display), width,
+                 height);
+     SDL_SetWindowFullscreenMode(sdl_window_, nullptr);

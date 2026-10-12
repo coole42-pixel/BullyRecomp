@@ -76,12 +76,14 @@ class BullyrecompApp : public rex::ReXApp {
     if (config.graphics) {
       SetDefaultFlag("d3d12_submit_on_primary_buffer_end", "false");
       SetDefaultFlag("d3d12_pipeline_creation_threads", "8");
-      // Frame pacing (OPTIMIZATION.md, Phase 4). In this SDK `vsync` is the *guest* vblank
-      // emulation, not host present sync. With it on, the command processor Sleep()s in 1 ms
-      // steps inside every PM4 WAIT_REG_MEM, and the game's own 360 swap scheduler then
-      // misses vblanks: the busy tutorial yard ran at a flat 30 fps (p99 45 ms). With it off
-      // the waits yield instead and the yard runs at ~60 (p99 20 ms, 1.3 ms jitter). Game
-      // time comes from mftb, not vblank counts, and host presentation still caps at 60.
+      // Synchronize to the display without enabling the guest vblank/sleep path,
+      // which drops busy scenes to 30 fps (OPTIMIZATION.md, Phase 4).
+      // Requires patches/rexglue-sdk-host-vsync.patch in the local runtime.
+      SetDefaultFlag("d3d12_vsync", "true");
+      SetDefaultFlag("d3d12_frame_pacing", "true");
+      SetDefaultFlag("d3d12_allow_variable_refresh_rate_and_tearing", "false");
+      SetDefaultFlag("fullscreen_exclusive", "true");
+      SetDefaultFlag("fullscreen_refresh_rate", "60");
       SetDefaultFlag("vsync", "false");
       // A new pipeline otherwise blocks the command processor while it compiles; seen as
       // 0.5-6 s freezes on first visits. Async skips those draws for a few frames instead.
@@ -105,6 +107,9 @@ class BullyrecompApp : public rex::ReXApp {
     for (const char* flag : {"async_shader_compilation", "render_target_path_d3d12",
                             "occlusion_query_enable", "readback_resolve",
                             "readback_memexport", "gpu_allow_invalid_fetch_constants", "vsync",
+                            "d3d12_vsync",
+                            "d3d12_frame_pacing", "fullscreen_exclusive", "fullscreen_refresh_rate",
+                            "bully_fps_limit",
                             "d3d12_submit_on_primary_buffer_end", "bully_cs_spin_us",
                             "resolution_scale", "draw_resolution_scale_x",
                             "draw_resolution_scale_y", "mnk_mode", "log_level"}) {

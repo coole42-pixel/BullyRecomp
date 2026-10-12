@@ -49,16 +49,26 @@ swap_post_effect = none
 ; Anisotropic filtering: -1 = game setting, 0 = off, 1 = 1x, 2 = 2x, 3 = 4x, 4 = 8x, 5 = 16x
 anisotropic_override = 3
 fullscreen = true
+; Use a 60 Hz fullscreen display mode for even 60 FPS delivery (desktop mode is restored on exit).
+fullscreen_exclusive = true
+fullscreen_refresh_rate = 60
 ; Window size when not fullscreen (0 = default)
 window_width = 0
 window_height = 0
-; Let G-Sync/FreeSync displays follow the game's frame rate
-d3d12_allow_variable_refresh_rate_and_tearing = true
+; Display VSync: prevents tearing while allowing 60 fps when rendering keeps up.
+d3d12_vsync = true
+; Prevent multiple old frames accumulating in the display queue
+d3d12_frame_pacing = true
+; Allow G-Sync/FreeSync and tearing when display VSync is disabled
+d3d12_allow_variable_refresh_rate_and_tearing = false
 
 [Performance]
+; Produce one new game frame per 16.67 ms; 0 disables the limit
+bully_fps_limit = 60
 ; Compile new shaders in the background (brief pop-in) instead of freezing the game
 async_shader_compilation = true
-; Emulated console vblank. false = smooth 60 fps; true caps busy scenes at 30 fps.
+; Guest console timing (separate from display VSync). Keep false for 60 fps;
+; true can reduce busy scenes to 30 fps.
 vsync = false
 ; Microseconds to spin on a busy game lock before sleeping (0 = runtime default)
 bully_cs_spin_us = 20
